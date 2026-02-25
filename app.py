@@ -17,17 +17,11 @@ st.set_page_config(page_title="Used Oil Pilot Dashboard – Maharashtra", layout
 st.markdown(
     f"""
     <style>
-      /* Page background + base font */
-      .stApp {{
-        background: #ffffff;
-      }}
+      .stApp {{ background: #ffffff; }}
 
-      /* Make text bigger overall */
-      html, body, [class*="css"] {{
-        font-size: 17px !important;
-      }}
+      /* Larger base font */
+      html, body, [class*="css"] {{ font-size: 17px !important; }}
 
-      /* Title */
       .title {{
         font-size: 34px;
         font-weight: 800;
@@ -91,10 +85,8 @@ st.markdown(
         color: {DARK_BLUE};
       }}
 
-      /* Dataframe header a touch bolder */
-      thead tr th {{
-        font-weight: 700 !important;
-      }}
+      /* Dataframe header */
+      thead tr th {{ font-weight: 700 !important; }}
     </style>
     """,
     unsafe_allow_html=True
@@ -102,7 +94,10 @@ st.markdown(
 
 # ---------------- Header ----------------
 st.markdown('<div class="title">Used Oil Collection Pilot — Maharashtra</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">Filter workshops by volume, visualize on map, and generate a one-way milk-run route from the depot.</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="subtitle">Filter workshops by volume, visualize on map, and generate a one-way milk-run route from the depot.</div>',
+    unsafe_allow_html=True
+)
 
 uploaded = st.sidebar.file_uploader("Upload MH geocoded Excel", type=["xlsx"])
 if uploaded is None:
@@ -228,7 +223,7 @@ def apply_jitter(df_points: pd.DataFrame, jitter_m=0.0) -> pd.DataFrame:
     return out
 
 
-def scale_sizes(values, min_size=12, max_size=28):
+def scale_sizes(values, min_size=12, max_size=30):
     v = pd.to_numeric(values, errors="coerce").fillna(0).astype(float)
     vmin, vmax = float(v.min()), float(v.max())
     if vmax <= vmin + 1e-9:
@@ -279,7 +274,7 @@ name_q = st.sidebar.text_input("Search by name", "")
 
 annual_min = st.sidebar.number_input("Annual ≥ (MT)", 0.0, value=0.0)
 monthly_min = st.sidebar.number_input("Monthly ≥ (MT)", 0.0, value=0.0)
-weekly_min  = st.sidebar.number_input("Weekly ≥ (MT)", 0.0, value=0.0)
+weekly_min = st.sidebar.number_input("Weekly ≥ (MT)", 0.0, value=0.0)
 
 top_n = st.sidebar.number_input("Top N by Annual (0 = all)", 0, value=0, step=5)
 
@@ -350,7 +345,7 @@ if len(f_plot) > 0:
         name="Workshops"
     ))
 
-# Depot pin (use ORANGE to match palette)
+# Depot pin
 fig.add_trace(go.Scattermapbox(
     lat=[float(depot["Latitude"])],
     lon=[float(depot["Longitude"])],
@@ -371,7 +366,7 @@ fig.update_layout(
         zoom=6.8
     ),
     margin=dict(l=0, r=0, t=0, b=0),
-    height=800
+    height=620  # ✅ smaller map height
 )
 
 # ---------------- Route optimization + draw line ----------------
@@ -419,7 +414,23 @@ if run_route:
                 name="Optimized route"
             ))
 
+# ✅ framed map container (presentation look)
+st.markdown(
+    """
+    <div style="
+        border:1px solid rgba(10,35,101,0.12);
+        border-radius:14px;
+        padding:6px;
+        box-shadow:0 6px 18px rgba(10,35,101,0.06);
+        margin-bottom:8px;
+    ">
+    """,
+    unsafe_allow_html=True
+)
+
 st.plotly_chart(fig, use_container_width=True)
+
+st.markdown("</div>", unsafe_allow_html=True)
 
 if route_km is not None:
     st.success(f"One-way distance (approx): {route_km:.1f} km")
@@ -430,7 +441,7 @@ if route_km is not None:
                   "Weekly_Generation_MT", "Monthly_Generation_MT", "Generation_MT"]]
         .reset_index(drop=True),
         use_container_width=True,
-        height=360
+        height=320
     )
 
 # ---------------- Table + Download ----------------
