@@ -366,7 +366,7 @@ fig.update_layout(
         zoom=6.8
     ),
     margin=dict(l=0, r=0, t=0, b=0),
-    height=620  # ✅ smaller map height
+    height=500  # ✅ smaller map height
 )
 
 # ---------------- Route optimization + draw line ----------------
