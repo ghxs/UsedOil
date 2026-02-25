@@ -6,8 +6,103 @@ import streamlit as st
 import plotly.graph_objects as go
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
+# ---------------- Brand colors ----------------
+ORANGE = "#F26522"
+DARK_BLUE = "#0A2365"
+BLUE = "#0085C8"
+
 st.set_page_config(page_title="Used Oil Pilot Dashboard – Maharashtra", layout="wide")
-st.title("Used Oil Collection Pilot – Maharashtra")
+
+# ---------------- Global UI styling ----------------
+st.markdown(
+    f"""
+    <style>
+      /* Page background + base font */
+      .stApp {{
+        background: #ffffff;
+      }}
+
+      /* Make text bigger overall */
+      html, body, [class*="css"] {{
+        font-size: 17px !important;
+      }}
+
+      /* Title */
+      .title {{
+        font-size: 34px;
+        font-weight: 800;
+        color: {DARK_BLUE};
+        margin-bottom: 0.2rem;
+      }}
+      .subtitle {{
+        font-size: 16px;
+        color: #334155;
+        margin-top: 0;
+        margin-bottom: 1rem;
+      }}
+
+      /* KPI cards */
+      .kpi-wrap {{
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 14px;
+        margin: 6px 0 16px 0;
+      }}
+      .kpi {{
+        border: 1px solid rgba(10,35,101,0.12);
+        border-left: 6px solid {BLUE};
+        border-radius: 14px;
+        padding: 14px 14px;
+        background: #ffffff;
+        box-shadow: 0 8px 22px rgba(10,35,101,0.06);
+      }}
+      .kpi.orange {{ border-left-color: {ORANGE}; }}
+      .kpi.dark {{ border-left-color: {DARK_BLUE}; }}
+      .kpi .label {{
+        font-size: 14px;
+        color: #475569;
+        margin-bottom: 6px;
+        font-weight: 600;
+      }}
+      .kpi .value {{
+        font-size: 26px;
+        color: #0f172a;
+        font-weight: 800;
+        line-height: 1.1;
+      }}
+
+      /* Buttons */
+      .stButton > button {{
+        background: {ORANGE};
+        color: white;
+        border: none;
+        padding: 0.65rem 1.0rem;
+        border-radius: 10px;
+        font-weight: 800;
+        font-size: 16px;
+      }}
+      .stButton > button:hover {{
+        background: #d9551e;
+        color: white;
+      }}
+
+      /* Sidebar headings */
+      section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 {{
+        color: {DARK_BLUE};
+      }}
+
+      /* Dataframe header a touch bolder */
+      thead tr th {{
+        font-weight: 700 !important;
+      }}
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+# ---------------- Header ----------------
+st.markdown('<div class="title">Used Oil Collection Pilot — Maharashtra</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtitle">Filter workshops by volume, visualize on map, and generate a one-way milk-run route from the depot.</div>', unsafe_allow_html=True)
 
 uploaded = st.sidebar.file_uploader("Upload MH geocoded Excel", type=["xlsx"])
 if uploaded is None:
@@ -142,6 +237,32 @@ def scale_sizes(values, min_size=12, max_size=28):
     return (min_size + x * (max_size - min_size)).to_numpy()
 
 
+def kpi_cards(workshops_count, weekly_mt, monthly_mt, annual_mt):
+    st.markdown(
+        f"""
+        <div class="kpi-wrap">
+          <div class="kpi dark">
+            <div class="label">Workshops (filtered)</div>
+            <div class="value">{workshops_count}</div>
+          </div>
+          <div class="kpi">
+            <div class="label">Weekly total (MT)</div>
+            <div class="value">{weekly_mt:,.2f}</div>
+          </div>
+          <div class="kpi orange">
+            <div class="label">Monthly total (MT)</div>
+            <div class="value">{monthly_mt:,.2f}</div>
+          </div>
+          <div class="kpi">
+            <div class="label">Annual total (MT)</div>
+            <div class="value">{annual_mt:,.2f}</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
 # ---------------- Load and filter ----------------
 df = load_excel(uploaded)
 
@@ -156,11 +277,11 @@ sites = df[~depot_mask].copy()
 st.sidebar.header("Filters")
 name_q = st.sidebar.text_input("Search by name", "")
 
-annual_min = st.sidebar.number_input("Annual ≥", 0.0, value=0.0)
-monthly_min = st.sidebar.number_input("Monthly ≥", 0.0, value=0.0)
-weekly_min  = st.sidebar.number_input("Weekly ≥", 0.0, value=0.0)
+annual_min = st.sidebar.number_input("Annual ≥ (MT)", 0.0, value=0.0)
+monthly_min = st.sidebar.number_input("Monthly ≥ (MT)", 0.0, value=0.0)
+weekly_min  = st.sidebar.number_input("Weekly ≥ (MT)", 0.0, value=0.0)
 
-top_n = st.sidebar.number_input("Top N (0 = all)", 0, value=0, step=5)
+top_n = st.sidebar.number_input("Top N by Annual (0 = all)", 0, value=0, step=5)
 
 st.sidebar.header("Map display")
 use_jitter = st.sidebar.checkbox("Jitter overlapping pins", True)
@@ -180,17 +301,17 @@ f = f[
 if top_n > 0:
     f = f.sort_values("Generation_MT", ascending=False).head(int(top_n))
 
-# KPIs
-k1, k2, k3 = st.columns(3)
-k1.metric("Workshops", len(f))
-k2.metric("Weekly MT", round(float(f["Weekly_Generation_MT"].sum()), 2))
-k3.metric("Annual MT", round(float(f["Generation_MT"].sum()), 2))
+weekly_total = float(f["Weekly_Generation_MT"].sum())
+monthly_total = float(f["Monthly_Generation_MT"].sum())
+annual_total = float(f["Generation_MT"].sum())
+
+kpi_cards(len(f), weekly_total, monthly_total, annual_total)
 
 # Plot data (with jitter for visualization)
 f_plot = apply_jitter(f, jitter_m)
-sizes = scale_sizes(f_plot["Weekly_Generation_MT"], min_size=12, max_size=28)
+sizes = scale_sizes(f_plot["Weekly_Generation_MT"], min_size=12, max_size=30)
 
-# Lookup for jittered plotting coordinates (for route line drawing)
+# Lookup for jittered plotting coordinates (for route line)
 plot_lut = dict(zip(
     f_plot["Customer_Code"].astype(str),
     zip(f_plot["Lat_plot"].astype(float), f_plot["Lon_plot"].astype(float))
@@ -205,10 +326,10 @@ if len(f_plot) > 0:
         lat=f_plot["Lat_plot"],
         lon=f_plot["Lon_plot"],
         mode="markers+text",
-        marker=dict(size=sizes, color="blue", opacity=0.92),
+        marker=dict(size=sizes, color=BLUE, opacity=0.95),
         text=["📍"] * len(f_plot),
         textposition="top center",
-        textfont=dict(size=14, color="blue"),
+        textfont=dict(size=15, color=BLUE),
         hovertext=f_plot["Customer_Name"],
         customdata=np.stack([
             f_plot["City"],
@@ -229,15 +350,15 @@ if len(f_plot) > 0:
         name="Workshops"
     ))
 
-# Depot pin
+# Depot pin (use ORANGE to match palette)
 fig.add_trace(go.Scattermapbox(
     lat=[float(depot["Latitude"])],
     lon=[float(depot["Longitude"])],
     mode="markers+text",
-    marker=dict(size=26, color="red", opacity=1),
+    marker=dict(size=30, color=ORANGE, opacity=1),
     text=["📌"],
     textposition="top center",
-    textfont=dict(size=16, color="red"),
+    textfont=dict(size=17, color=ORANGE),
     hovertext=[depot["Customer_Name"]],
     hovertemplate="<b>Depot: %{hovertext}</b><extra></extra>",
     name="Depot"
@@ -250,11 +371,13 @@ fig.update_layout(
         zoom=6.8
     ),
     margin=dict(l=0, r=0, t=0, b=0),
-    height=780
+    height=800
 )
 
 # ---------------- Route optimization + draw line ----------------
-run_route = st.button("Optimize route (draw line)")
+c1, c2 = st.columns([1, 3], vertical_alignment="center")
+with c1:
+    run_route = st.button("Optimize route (draw line)")
 
 route_df = None
 route_km = None
@@ -277,7 +400,6 @@ if run_route:
             route_df = ordered.iloc[route_nodes].reset_index(drop=True)
             route_km = obj_m / 1000.0
 
-            # Build line coords: use jittered coords for workshops; real coords for depot
             line_lat, line_lon = [], []
             for _, r in route_df.iterrows():
                 code = str(r["Customer_Code"])
@@ -293,7 +415,7 @@ if run_route:
                 lat=line_lat,
                 lon=line_lon,
                 mode="lines",
-                line=dict(width=4, color="black"),
+                line=dict(width=5, color=DARK_BLUE),
                 name="Optimized route"
             ))
 
@@ -301,15 +423,19 @@ st.plotly_chart(fig, use_container_width=True)
 
 if route_km is not None:
     st.success(f"One-way distance (approx): {route_km:.1f} km")
+
     st.subheader("Route order")
     st.dataframe(
-        route_df[["Customer_Name", "City", "Pin_Code", "Weekly_Generation_MT", "Monthly_Generation_MT", "Generation_MT"]]
+        route_df[["Customer_Name", "City", "Pin_Code",
+                  "Weekly_Generation_MT", "Monthly_Generation_MT", "Generation_MT"]]
         .reset_index(drop=True),
-        use_container_width=True
+        use_container_width=True,
+        height=360
     )
 
 # ---------------- Table + Download ----------------
 st.subheader("Filtered list")
+
 show_cols = [
     "Customer_Code", "Customer_Name", "City", "Pin_Code",
     "Generation_MT", "Monthly_Generation_MT", "Weekly_Generation_MT", "Geocode_Status"
