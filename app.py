@@ -1,4 +1,5 @@
 import math
+import hashlib
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -6,7 +7,6 @@ import plotly.graph_objects as go
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
 st.set_page_config(page_title="Used Oil Pilot Dashboard – Maharashtra", layout="wide")
-
 st.title("Used Oil Collection Pilot – Maharashtra")
 
 uploaded = st.sidebar.file_uploader("Upload MH geocoded Excel", type=["xlsx"])
@@ -56,24 +56,68 @@ def build_distance_matrix(coords):
     return mat
 
 
+def _stable_u01(seed_text: str) -> float:
+    """Stable [0,1) from text, consistent across runs/deploys."""
+    h = hashlib.sha256(seed_text.encode("utf-8")).hexdigest()
+    return (int(h[:16], 16) % 10**12) / 10**12
+
+
+def apply_jitter(df_points: pd.DataFrame, lat_col="Latitude", lon_col="Longitude",
+                 key_col="Customer_Code", jitter_m=0.0) -> pd.DataFrame:
+    """
+    Adds Lat_plot/Lon_plot columns. Deterministic jitter in meters (approx).
+    Jitter is small visual-only (does not change routing calculations).
+    """
+    out = df_points.copy()
+    if jitter_m <= 0:
+        out["Lat_plot"] = out[lat_col].astype(float)
+        out["Lon_plot"] = out[lon_col].astype(float)
+        return out
+
+    lats = out[lat_col].astype(float).to_numpy()
+    lons = out[lon_col].astype(float).to_numpy()
+
+    lat_plot = []
+    lon_plot = []
+
+    for i in range(len(out)):
+        code = str(out.iloc[i][key_col])
+        u1 = _stable_u01(code + "|u1")
+        u2 = _stable_u01(code + "|u2")
+        angle = 2 * math.pi * u1
+        radius = jitter_m * (0.2 + 0.8 * u2)  # avoid too many tiny jitters
+
+        # meters -> degrees
+        dlat = (radius * math.cos(angle)) / 111_320.0
+        lat0 = lats[i]
+        denom = 111_320.0 * max(math.cos(math.radians(lat0)), 0.2)
+        dlon = (radius * math.sin(angle)) / denom
+
+        lat_plot.append(lat0 + dlat)
+        lon_plot.append(lons[i] + dlon)
+
+    out["Lat_plot"] = lat_plot
+    out["Lon_plot"] = lon_plot
+    return out
+
+
 def solve_open_route_from_depot(coords, seconds=2):
     """
-    Open path: start at depot (index 0), visit all points, END ANYWHERE (one-way milk run).
-    Trick: add a dummy end node with zero cost from any node -> end at dummy.
+    Open path: start at depot (index 0), visit all points, end anywhere (one-way milk run).
+    Uses a dummy end node with zero inbound cost from any node.
     """
-    # coords: depot + sites
     n = len(coords)
-    dummy_end = n  # new node index
-    coords2 = coords + [coords[0]]  # dummy coords (same as depot; not used)
-    dist = build_distance_matrix(coords2)
+    dummy_end = n
+    coords2 = coords + [coords[0]]  # dummy coord
 
+    dist = build_distance_matrix(coords2)
     BIG = 10**9
 
-    # Set distance TO dummy end as 0 from any node (lets route end there freely)
+    # allow ending at dummy for free
     for i in range(n + 1):
         dist[i][dummy_end] = 0
 
-    # Prevent starting from dummy or going out of dummy meaningfully
+    # prevent leaving dummy
     for j in range(n + 1):
         dist[dummy_end][j] = BIG
     dist[dummy_end][dummy_end] = 0
@@ -98,23 +142,19 @@ def solve_open_route_from_depot(coords, seconds=2):
     if not sol:
         return None, None, None
 
-    # Extract route
     route_nodes = []
     idx = routing.Start(0)
     while not routing.IsEnd(idx):
         route_nodes.append(manager.IndexToNode(idx))
         idx = sol.Value(routing.NextVar(idx))
-    route_nodes.append(manager.IndexToNode(idx))  # dummy_end
+    route_nodes.append(manager.IndexToNode(idx))  # should be dummy_end
 
-    # Objective is in "meters" because we built it that way
-    objective_m = sol.ObjectiveValue()
-
-    return route_nodes, objective_m, dummy_end
+    return route_nodes, sol.ObjectiveValue(), dummy_end
 
 
 df = load_excel(uploaded)
 
-# Identify depot
+# Depot + sites
 depot_mask = df["Customer_Code"].astype(str).str.contains("DEPOT_ABC", na=False)
 if not depot_mask.any():
     st.error("Depot row not found. Expecting Customer_Code containing 'DEPOT_ABC'.")
@@ -123,9 +163,8 @@ if not depot_mask.any():
 depot = df[depot_mask].iloc[0]
 sites = df[~depot_mask].copy()
 
-# Sidebar filters
+# ---------------- Sidebar: filters ----------------
 st.sidebar.header("Filters")
-
 name_q = st.sidebar.text_input("Search by name", value="", placeholder="type workshop name")
 
 annual_min = st.sidebar.number_input("Annual ≥ (MT)", min_value=0.0, value=0.0, step=0.5)
@@ -134,9 +173,12 @@ weekly_min = st.sidebar.number_input("Weekly ≥ (MT)", min_value=0.0, value=0.0
 
 top_n = st.sidebar.number_input("Top N by Annual MT (0 = all)", min_value=0, max_value=1000, value=0, step=5)
 
+st.sidebar.header("Map display")
+use_jitter = st.sidebar.checkbox("Jitter overlapping pins", value=True)
+jitter_m = st.sidebar.slider("Jitter strength (meters)", min_value=0, max_value=600, value=120, step=20) if use_jitter else 0
+
 # Apply filters
 f = sites.copy()
-
 if name_q.strip():
     q = name_q.strip().lower()
     f = f[f["Customer_Name"].str.lower().str.contains(q)]
@@ -161,67 +203,57 @@ k2.metric("Annual total (MT)", f"{total_annual:,.2f}")
 k3.metric("Monthly total (MT)", f"{total_monthly:,.2f}")
 k4.metric("Weekly total (MT)", f"{total_weekly:,.2f}")
 
-# ---------- Map (Pins) ----------
-# Plotly scattermapbox supports pin-like symbols via marker.symbol="marker"
-# We'll use go.Scattermapbox for full control and hovertemplate.
+# Prepare plotting coords (visual-only jitter)
+f_plot = apply_jitter(f, jitter_m=float(jitter_m))
 
 center_lat = float(depot["Latitude"])
 center_lon = float(depot["Longitude"])
 
+# ---------------- Map figure (emoji pins) ----------------
 fig = go.Figure()
 
-# Workshop pins (blue)
-if len(f) > 0:
+# Workshops: blue pin emoji, hover without address
+if len(f_plot) > 0:
     customdata = np.stack([
-        f["Address"].astype(str),
-        f["Generation_MT"].astype(float),
-        f["Monthly_Generation_MT"].astype(float),
-        f["Weekly_Generation_MT"].astype(float),
+        f_plot["City"].astype(str),
+        f_plot["Pin_Code"].astype(str),
+        f_plot["Generation_MT"].astype(float),
+        f_plot["Monthly_Generation_MT"].astype(float),
+        f_plot["Weekly_Generation_MT"].astype(float),
     ], axis=1)
 
     fig.add_trace(go.Scattermapbox(
-        lat=f["Latitude"],
-        lon=f["Longitude"],
-        mode="markers",
-        marker=go.scattermapbox.Marker(
-            size=14,
-            color="blue",
-            symbol="marker"  # pin-like
-        ),
+        lat=f_plot["Lat_plot"],
+        lon=f_plot["Lon_plot"],
+        mode="text",
+        text=["📍"] * len(f_plot),
+        textfont=dict(size=18, color="blue"),
         name="Workshops",
         customdata=customdata,
         hovertemplate=(
-            "<b>%{text}</b><br>"
-            "%{customdata[0]}<br>"
-            "Annual: %{customdata[1]:.2f} MT<br>"
-            "Monthly: %{customdata[2]:.2f} MT<br>"
-            "Weekly: %{customdata[3]:.2f} MT<br>"
+            "<b>%{hovertext}</b><br>"
+            "City: %{customdata[0]}<br>"
+            "Pincode: %{customdata[1]}<br>"
+            "Annual: %{customdata[2]:.2f} MT<br>"
+            "Monthly: %{customdata[3]:.2f} MT<br>"
+            "Weekly: %{customdata[4]:.2f} MT<br>"
             "<extra></extra>"
         ),
-        text=f["Customer_Name"]
+        hovertext=f_plot["Customer_Name"]
     ))
 
-# Depot pin (red)
+# Depot: red pin emoji
 fig.add_trace(go.Scattermapbox(
     lat=[center_lat],
     lon=[center_lon],
-    mode="markers",
-    marker=go.scattermapbox.Marker(
-        size=18,
-        color="red",
-        symbol="marker"
-    ),
+    mode="text",
+    text=["📌"],
+    textfont=dict(size=22, color="red"),
     name="Depot (ABC Petrochem)",
-    hovertemplate=(
-        "<b>Depot: %{text}</b><br>"
-        "%{customdata}<br>"
-        "<extra></extra>"
-    ),
-    text=[depot["Customer_Name"]],
-    customdata=[depot["Address"] if "Address" in depot else ""]
+    hovertemplate="<b>Depot: %{hovertext}</b><extra></extra>",
+    hovertext=[depot["Customer_Name"]]
 ))
 
-# Layout
 fig.update_layout(
     mapbox=dict(
         style="open-street-map",
@@ -233,17 +265,16 @@ fig.update_layout(
     legend=dict(orientation="h", yanchor="bottom", y=0.01, xanchor="left", x=0.01)
 )
 
-# ---------- Route Optimization ----------
+# ---------------- Route Optimization ----------------
 st.divider()
 st.subheader("Route optimization (one-way milk run from depot)")
-st.caption("Currently uses straight-line distance (Haversine). Next upgrade can be road distance using Google Distance Matrix API.")
+st.caption("Distance uses straight-line (Haversine). Next upgrade: road distance via Google Distance Matrix API.")
 
 route_col1, route_col2 = st.columns([1, 2], vertical_alignment="top")
 
 with route_col1:
     run_route = st.button("Optimize route for filtered workshops")
 
-route_info = None
 route_df = None
 route_km = None
 
@@ -251,6 +282,7 @@ if run_route:
     if len(f) < 1:
         st.warning("No workshops in the filtered list. Adjust filters first.")
     else:
+        # Use ORIGINAL coordinates for routing (accuracy)
         ordered = pd.concat([pd.DataFrame([depot]), f], ignore_index=True).reset_index(drop=True)
         coords = list(zip(ordered["Latitude"].astype(float), ordered["Longitude"].astype(float)))
 
@@ -259,45 +291,58 @@ if run_route:
         if route_nodes is None:
             st.error("Could not compute a route. Try reducing Top N or widening filters.")
         else:
-            # Remove dummy end node
-            route_nodes_no_dummy = [n for n in route_nodes if n != dummy_end]
+            # Remove dummy end
+            route_nodes = [n for n in route_nodes if n != dummy_end]
+            route_df = ordered.iloc[route_nodes].reset_index(drop=True)
+            route_km = objective_m / 1000.0  # one-way by construction
 
-            route_df = ordered.iloc[route_nodes_no_dummy].reset_index(drop=True)
-            route_km = objective_m / 1000.0  # already one-way because dummy end costs 0
+            # Build a plotting version of the route that matches jittered points
+            # Depot is first, workshops follow. We'll map by Customer_Code.
+            if use_jitter and len(f_plot) > 0:
+                # Create lookup for plotted coords
+                lut = dict(zip(f_plot["Customer_Code"].astype(str), zip(f_plot["Lat_plot"], f_plot["Lon_plot"])))
+                route_lat = []
+                route_lon = []
+                for _, row in route_df.iterrows():
+                    code = str(row["Customer_Code"])
+                    if "DEPOT_ABC" in code:
+                        route_lat.append(center_lat)
+                        route_lon.append(center_lon)
+                    else:
+                        latlon = lut.get(code, (float(row["Latitude"]), float(row["Longitude"])))
+                        route_lat.append(latlon[0])
+                        route_lon.append(latlon[1])
+            else:
+                route_lat = route_df["Latitude"].astype(float).tolist()
+                route_lon = route_df["Longitude"].astype(float).tolist()
 
-            route_info = {
-                "one_way_km": route_km,
-                "stops": len(route_df),
-            }
-
-            # Add route line to map
+            # Add route line on the map
             fig.add_trace(go.Scattermapbox(
-                lat=route_df["Latitude"],
-                lon=route_df["Longitude"],
+                lat=route_lat,
+                lon=route_lon,
                 mode="lines",
                 line=dict(width=4, color="black"),
                 name="Optimized route"
             ))
 
 with route_col2:
-    st.subheader("Map (pins + hover details)")
+    st.subheader("Map")
     st.plotly_chart(fig, use_container_width=True)
 
-# Show route outputs if available
-if route_info:
-    st.success(f"One-way distance (approx): {route_info['one_way_km']:.1f} km | Stops (incl. depot start): {route_info['stops']}")
+if route_km is not None:
+    st.success(f"One-way distance (approx): {route_km:.1f} km | Stops (incl. depot start): {len(route_df)}")
 
     st.subheader("Route order")
     st.dataframe(
-        route_df[["Customer_Name", "Address", "City", "Pin_Code", "Weekly_Generation_MT", "Monthly_Generation_MT", "Generation_MT"]]
+        route_df[["Customer_Name", "City", "Pin_Code", "Weekly_Generation_MT", "Monthly_Generation_MT", "Generation_MT"]]
         .reset_index(drop=True),
         use_container_width=True
     )
 
-# Table + download
+# ---------------- Table + Download ----------------
 st.subheader("Filtered list")
 show_cols = [
-    "Customer_Code", "Customer_Name", "Address", "City", "Pin_Code",
+    "Customer_Code", "Customer_Name", "City", "Pin_Code",
     "Generation_MT", "Monthly_Generation_MT", "Weekly_Generation_MT", "Geocode_Status"
 ]
 st.dataframe(
