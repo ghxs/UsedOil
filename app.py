@@ -19,17 +19,14 @@ if uploaded is None:
 def load_excel(file) -> pd.DataFrame:
     df = pd.read_excel(file)
 
-    # numeric
     for c in ["Generation_MT", "Monthly_Generation_MT", "Weekly_Generation_MT", "Latitude", "Longitude"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    # strings
-    for c in ["Customer_Code", "Customer_Name", "Address", "City", "Pin_Code", "Geocode_Status"]:
+    for c in ["Customer_Code", "Customer_Name", "City", "Pin_Code", "Geocode_Status"]:
         if c in df.columns:
             df[c] = df[c].fillna("").astype(str)
 
-    # keep only geocoded
     df = df[df["Latitude"].notna() & df["Longitude"].notna()].copy()
     return df
 
@@ -57,44 +54,34 @@ def build_distance_matrix(coords):
 
 
 def _stable_u01(seed_text: str) -> float:
-    """Stable [0,1) from text, consistent across runs/deploys."""
     h = hashlib.sha256(seed_text.encode("utf-8")).hexdigest()
     return (int(h[:16], 16) % 10**12) / 10**12
 
 
-def apply_jitter(df_points: pd.DataFrame, lat_col="Latitude", lon_col="Longitude",
-                 key_col="Customer_Code", jitter_m=0.0) -> pd.DataFrame:
-    """
-    Adds Lat_plot/Lon_plot columns. Deterministic jitter in meters (approx).
-    Jitter is small visual-only (does not change routing calculations).
-    """
+def apply_jitter(df_points: pd.DataFrame, jitter_m=0.0) -> pd.DataFrame:
     out = df_points.copy()
     if jitter_m <= 0:
-        out["Lat_plot"] = out[lat_col].astype(float)
-        out["Lon_plot"] = out[lon_col].astype(float)
+        out["Lat_plot"] = out["Latitude"].astype(float)
+        out["Lon_plot"] = out["Longitude"].astype(float)
         return out
 
-    lats = out[lat_col].astype(float).to_numpy()
-    lons = out[lon_col].astype(float).to_numpy()
-
-    lat_plot = []
-    lon_plot = []
-
-    for i in range(len(out)):
-        code = str(out.iloc[i][key_col])
+    lat_plot, lon_plot = [], []
+    for _, row in out.iterrows():
+        code = str(row["Customer_Code"])
         u1 = _stable_u01(code + "|u1")
         u2 = _stable_u01(code + "|u2")
         angle = 2 * math.pi * u1
-        radius = jitter_m * (0.2 + 0.8 * u2)  # avoid too many tiny jitters
+        radius = jitter_m * (0.25 + 0.75 * u2)
 
-        # meters -> degrees
+        lat0 = float(row["Latitude"])
+        lon0 = float(row["Longitude"])
+
         dlat = (radius * math.cos(angle)) / 111_320.0
-        lat0 = lats[i]
         denom = 111_320.0 * max(math.cos(math.radians(lat0)), 0.2)
         dlon = (radius * math.sin(angle)) / denom
 
         lat_plot.append(lat0 + dlat)
-        lon_plot.append(lons[i] + dlon)
+        lon_plot.append(lon0 + dlon)
 
     out["Lat_plot"] = lat_plot
     out["Lon_plot"] = lon_plot
@@ -104,20 +91,16 @@ def apply_jitter(df_points: pd.DataFrame, lat_col="Latitude", lon_col="Longitude
 def solve_open_route_from_depot(coords, seconds=2):
     """
     Open path: start at depot (index 0), visit all points, end anywhere (one-way milk run).
-    Uses a dummy end node with zero inbound cost from any node.
+    Dummy end node with zero inbound cost.
     """
     n = len(coords)
     dummy_end = n
-    coords2 = coords + [coords[0]]  # dummy coord
-
+    coords2 = coords + [coords[0]]
     dist = build_distance_matrix(coords2)
     BIG = 10**9
 
-    # allow ending at dummy for free
     for i in range(n + 1):
         dist[i][dummy_end] = 0
-
-    # prevent leaving dummy
     for j in range(n + 1):
         dist[dummy_end][j] = BIG
     dist[dummy_end][dummy_end] = 0
@@ -147,14 +130,13 @@ def solve_open_route_from_depot(coords, seconds=2):
     while not routing.IsEnd(idx):
         route_nodes.append(manager.IndexToNode(idx))
         idx = sol.Value(routing.NextVar(idx))
-    route_nodes.append(manager.IndexToNode(idx))  # should be dummy_end
+    route_nodes.append(manager.IndexToNode(idx))
 
     return route_nodes, sol.ObjectiveValue(), dummy_end
 
 
 df = load_excel(uploaded)
 
-# Depot + sites
 depot_mask = df["Customer_Code"].astype(str).str.contains("DEPOT_ABC", na=False)
 if not depot_mask.any():
     st.error("Depot row not found. Expecting Customer_Code containing 'DEPOT_ABC'.")
@@ -163,22 +145,23 @@ if not depot_mask.any():
 depot = df[depot_mask].iloc[0]
 sites = df[~depot_mask].copy()
 
-# ---------------- Sidebar: filters ----------------
+# ---------------- Sidebar filters ----------------
 st.sidebar.header("Filters")
 name_q = st.sidebar.text_input("Search by name", value="", placeholder="type workshop name")
 
 annual_min = st.sidebar.number_input("Annual ≥ (MT)", min_value=0.0, value=0.0, step=0.5)
 monthly_min = st.sidebar.number_input("Monthly ≥ (MT)", min_value=0.0, value=0.0, step=0.1)
-weekly_min = st.sidebar.number_input("Weekly ≥ (MT)", min_value=0.0, value=0.0, step=0.05)
+weekly_min  = st.sidebar.number_input("Weekly ≥ (MT)", min_value=0.0, value=0.0, step=0.05)
 
 top_n = st.sidebar.number_input("Top N by Annual MT (0 = all)", min_value=0, max_value=1000, value=0, step=5)
 
 st.sidebar.header("Map display")
 use_jitter = st.sidebar.checkbox("Jitter overlapping pins", value=True)
-jitter_m = st.sidebar.slider("Jitter strength (meters)", min_value=0, max_value=600, value=120, step=20) if use_jitter else 0
+jitter_m = st.sidebar.slider("Jitter strength (meters)", 0, 800, 140, 20) if use_jitter else 0
 
 # Apply filters
 f = sites.copy()
+
 if name_q.strip():
     q = name_q.strip().lower()
     f = f[f["Customer_Name"].str.lower().str.contains(q)]
@@ -203,16 +186,15 @@ k2.metric("Annual total (MT)", f"{total_annual:,.2f}")
 k3.metric("Monthly total (MT)", f"{total_monthly:,.2f}")
 k4.metric("Weekly total (MT)", f"{total_weekly:,.2f}")
 
-# Prepare plotting coords (visual-only jitter)
+# Plot coords with jitter (visual only)
 f_plot = apply_jitter(f, jitter_m=float(jitter_m))
 
 center_lat = float(depot["Latitude"])
 center_lon = float(depot["Longitude"])
 
-# ---------------- Map figure (emoji pins) ----------------
+# ---------------- Map (marker always visible + emoji overlay) ----------------
 fig = go.Figure()
 
-# Workshops: blue pin emoji, hover without address
 if len(f_plot) > 0:
     customdata = np.stack([
         f_plot["City"].astype(str),
@@ -225,10 +207,13 @@ if len(f_plot) > 0:
     fig.add_trace(go.Scattermapbox(
         lat=f_plot["Lat_plot"],
         lon=f_plot["Lon_plot"],
-        mode="text",
+        mode="markers+text",
+        marker=dict(size=10, color="blue", opacity=0.9),
         text=["📍"] * len(f_plot),
-        textfont=dict(size=18, color="blue"),
+        textposition="top center",
+        textfont=dict(size=14, color="blue"),
         name="Workshops",
+        hovertext=f_plot["Customer_Name"],
         customdata=customdata,
         hovertemplate=(
             "<b>%{hovertext}</b><br>"
@@ -239,19 +224,20 @@ if len(f_plot) > 0:
             "Weekly: %{customdata[4]:.2f} MT<br>"
             "<extra></extra>"
         ),
-        hovertext=f_plot["Customer_Name"]
     ))
 
-# Depot: red pin emoji
+# Depot (red marker + 📌)
 fig.add_trace(go.Scattermapbox(
     lat=[center_lat],
     lon=[center_lon],
-    mode="text",
+    mode="markers+text",
+    marker=dict(size=14, color="red", opacity=0.95),
     text=["📌"],
-    textfont=dict(size=22, color="red"),
+    textposition="top center",
+    textfont=dict(size=16, color="red"),
     name="Depot (ABC Petrochem)",
+    hovertext=[depot["Customer_Name"]],
     hovertemplate="<b>Depot: %{hovertext}</b><extra></extra>",
-    hovertext=[depot["Customer_Name"]]
 ))
 
 fig.update_layout(
@@ -282,27 +268,21 @@ if run_route:
     if len(f) < 1:
         st.warning("No workshops in the filtered list. Adjust filters first.")
     else:
-        # Use ORIGINAL coordinates for routing (accuracy)
         ordered = pd.concat([pd.DataFrame([depot]), f], ignore_index=True).reset_index(drop=True)
         coords = list(zip(ordered["Latitude"].astype(float), ordered["Longitude"].astype(float)))
 
         route_nodes, objective_m, dummy_end = solve_open_route_from_depot(coords, seconds=2)
-
         if route_nodes is None:
             st.error("Could not compute a route. Try reducing Top N or widening filters.")
         else:
-            # Remove dummy end
             route_nodes = [n for n in route_nodes if n != dummy_end]
             route_df = ordered.iloc[route_nodes].reset_index(drop=True)
-            route_km = objective_m / 1000.0  # one-way by construction
+            route_km = objective_m / 1000.0
 
-            # Build a plotting version of the route that matches jittered points
-            # Depot is first, workshops follow. We'll map by Customer_Code.
+            # Use jittered points for visual line (optional), but keep real ordering
             if use_jitter and len(f_plot) > 0:
-                # Create lookup for plotted coords
                 lut = dict(zip(f_plot["Customer_Code"].astype(str), zip(f_plot["Lat_plot"], f_plot["Lon_plot"])))
-                route_lat = []
-                route_lon = []
+                route_lat, route_lon = [], []
                 for _, row in route_df.iterrows():
                     code = str(row["Customer_Code"])
                     if "DEPOT_ABC" in code:
@@ -316,7 +296,6 @@ if run_route:
                 route_lat = route_df["Latitude"].astype(float).tolist()
                 route_lon = route_df["Longitude"].astype(float).tolist()
 
-            # Add route line on the map
             fig.add_trace(go.Scattermapbox(
                 lat=route_lat,
                 lon=route_lon,
@@ -331,7 +310,6 @@ with route_col2:
 
 if route_km is not None:
     st.success(f"One-way distance (approx): {route_km:.1f} km | Stops (incl. depot start): {len(route_df)}")
-
     st.subheader("Route order")
     st.dataframe(
         route_df[["Customer_Name", "City", "Pin_Code", "Weekly_Generation_MT", "Monthly_Generation_MT", "Generation_MT"]]
