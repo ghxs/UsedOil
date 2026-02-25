@@ -19,14 +19,17 @@ if uploaded is None:
 def load_excel(file) -> pd.DataFrame:
     df = pd.read_excel(file)
 
+    # numeric
     for c in ["Generation_MT", "Monthly_Generation_MT", "Weekly_Generation_MT", "Latitude", "Longitude"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
+    # strings
     for c in ["Customer_Code", "Customer_Name", "City", "Pin_Code", "Geocode_Status"]:
         if c in df.columns:
             df[c] = df[c].fillna("").astype(str)
 
+    # keep only geocoded
     df = df[df["Latitude"].notna() & df["Longitude"].notna()].copy()
     return df
 
@@ -42,7 +45,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
 
 def build_distance_matrix(coords):
     n = len(coords)
-    mat = np.zeros((n, n), dtype=int)
+    mat = np.zeros((n, n), dtype=int)  # meters
     for i in range(n):
         for j in range(n):
             if i == j:
@@ -56,7 +59,7 @@ def build_distance_matrix(coords):
 def solve_open_route_from_depot(coords, seconds=2):
     """
     Open path: start at depot (index 0), visit all points, end anywhere (one-way milk run).
-    Achieved by adding a dummy end node with zero inbound cost.
+    Implemented by adding a dummy end node with zero inbound cost.
     """
     n = len(coords)
     dummy_end = n
@@ -64,11 +67,8 @@ def solve_open_route_from_depot(coords, seconds=2):
     dist = build_distance_matrix(coords2)
     BIG = 10**9
 
-    # allow ending at dummy for free
     for i in range(n + 1):
         dist[i][dummy_end] = 0
-
-    # prevent leaving dummy
     for j in range(n + 1):
         dist[dummy_end][j] = BIG
     dist[dummy_end][dummy_end] = 0
@@ -98,7 +98,7 @@ def solve_open_route_from_depot(coords, seconds=2):
     while not routing.IsEnd(idx):
         route_nodes.append(manager.IndexToNode(idx))
         idx = sol.Value(routing.NextVar(idx))
-    route_nodes.append(manager.IndexToNode(idx))  # dummy end
+    route_nodes.append(manager.IndexToNode(idx))
 
     return route_nodes, sol.ObjectiveValue(), dummy_end
 
@@ -109,6 +109,9 @@ def _stable_u01(seed_text: str) -> float:
 
 
 def apply_jitter(df_points: pd.DataFrame, jitter_m=0.0) -> pd.DataFrame:
+    """
+    Deterministic jitter in meters (visual-only). Adds Lat_plot/Lon_plot.
+    """
     out = df_points.copy()
     if jitter_m <= 0:
         out["Lat_plot"] = out["Latitude"].astype(float)
@@ -138,7 +141,10 @@ def apply_jitter(df_points: pd.DataFrame, jitter_m=0.0) -> pd.DataFrame:
     return out
 
 
-def scale_sizes(values, min_size=12, max_size=28):
+def scale_sizes(values: pd.Series, min_size=12, max_size=30) -> np.ndarray:
+    """
+    Scale marker sizes by weekly volume with a minimum size.
+    """
     v = pd.to_numeric(values, errors="coerce").fillna(0).astype(float)
     vmin, vmax = float(v.min()), float(v.max())
     if vmax <= vmin + 1e-9:
@@ -148,13 +154,13 @@ def scale_sizes(values, min_size=12, max_size=28):
 
 
 def build_map(depot_row, points_df_plot, route_df_plot=None):
-    # Maharashtra-ish center (tweakable)
+    # Maharashtra focus
     center_lat = float(depot_row["Latitude"]) - 0.4
     center_lon = float(depot_row["Longitude"]) + 0.1
 
     fig = go.Figure()
 
-    # Points
+    # Workshops
     if len(points_df_plot) > 0:
         sizes = scale_sizes(points_df_plot["Weekly_Generation_MT"], min_size=12, max_size=30)
 
@@ -202,32 +208,33 @@ def build_map(depot_row, points_df_plot, route_df_plot=None):
         hovertemplate="<b>Depot: %{hovertext}</b><extra></extra>",
     ))
 
-    # Route line (black)
+    # Route line
     if route_df_plot is not None and len(route_df_plot) >= 2:
         fig.add_trace(go.Scattermapbox(
             lat=route_df_plot["Lat_plot"],
             lon=route_df_plot["Lon_plot"],
             mode="lines",
             line=dict(width=4, color="black"),
-            name="Optimized route"
+            name="Optimized route",
         ))
 
     fig.update_layout(
         mapbox=dict(
             style="open-street-map",
             center=dict(lat=center_lat, lon=center_lon),
-            zoom=6.8
+            zoom=6.8,
         ),
         margin=dict(l=0, r=0, t=0, b=0),
         height=800,
-        legend=dict(orientation="h", yanchor="bottom", y=0.01, xanchor="left", x=0.01)
+        legend=dict(orientation="h", yanchor="bottom", y=0.01, xanchor="left", x=0.01),
     )
     return fig
 
 
-# ---------------- Load + split depot ----------------
+# ---------------- Load data ----------------
 df = load_excel(uploaded)
 
+# Identify depot row
 depot_mask = df["Customer_Code"].astype(str).str.contains("DEPOT_ABC", na=False)
 if not depot_mask.any():
     st.error("Depot row not found. Expecting Customer_Code containing 'DEPOT_ABC'.")
@@ -236,8 +243,8 @@ if not depot_mask.any():
 depot = df[depot_mask].iloc[0]
 sites = df[~depot_mask].copy()
 
-# ---------------- Sidebar Filters ----------------
-st.sidebar.header("Filters (reduce the list)")
+# ---------------- Sidebar filters ----------------
+st.sidebar.header("Filters")
 
 annual_min = st.sidebar.number_input("Annual ≥ (MT)", min_value=0.0, value=0.0, step=0.5)
 monthly_min = st.sidebar.number_input("Monthly ≥ (MT)", min_value=0.0, value=0.0, step=0.1)
@@ -249,91 +256,59 @@ st.sidebar.header("Map display")
 use_jitter = st.sidebar.checkbox("Jitter overlapping pins", value=True)
 jitter_m = st.sidebar.slider("Jitter meters", 0, 800, 140, 20) if use_jitter else 0
 
-# Apply numeric filters first
+# Apply numeric filters first (as before)
 filtered = sites.copy()
 filtered = filtered[
     (filtered["Generation_MT"] >= annual_min) &
     (filtered["Monthly_Generation_MT"] >= monthly_min) &
     (filtered["Weekly_Generation_MT"] >= weekly_min)
-]
+].copy()
+
 if top_n and top_n > 0:
     filtered = filtered.sort_values("Generation_MT", ascending=False).head(int(top_n)).copy()
 
-# KPI
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Filtered workshops", len(filtered))
-c2.metric("Annual total (MT)", f"{filtered['Generation_MT'].sum():.2f}")
-c3.metric("Monthly total (MT)", f"{filtered['Monthly_Generation_MT'].sum():.2f}")
-c4.metric("Weekly total (MT)", f"{filtered['Weekly_Generation_MT'].sum():.2f}")
+# Excel-style select-by-name in sidebar (all selected by default)
+st.sidebar.subheader("Workshops (tick/untick)")
 
-st.divider()
+options = list(zip(filtered["Customer_Code"].astype(str), filtered["Customer_Name"].astype(str)))
 
-# ---------------- Excel-like selection (tick/untick) ----------------
-st.subheader("Select workshops (manual tick/untick like Excel)")
+if "name_select_defaulted" not in st.session_state:
+    st.session_state.name_select_defaulted = False
 
-# Keep selection state across reruns
-if "select_state" not in st.session_state:
-    st.session_state.select_state = {}  # Customer_Code -> bool
+# If first time OR filter list changed drastically, default to "all selected"
+# (simple rule: if any selected code not in current options -> reset to all)
+option_codes = [c for c, _ in options]
+if "selected_codes" not in st.session_state or any(c not in option_codes for c in st.session_state.selected_codes):
+    st.session_state.selected_codes = option_codes
 
-# If new filtered set arrives, initialize missing items to True (default selected)
-for code in filtered["Customer_Code"].astype(str).tolist():
-    st.session_state.select_state.setdefault(code, True)
-
-# Buttons to select all / clear all for current filtered set
-b1, b2, b3 = st.columns([1, 1, 3])
-with b1:
-    if st.button("Select All"):
-        for code in filtered["Customer_Code"].astype(str).tolist():
-            st.session_state.select_state[code] = True
-with b2:
-    if st.button("Clear All"):
-        for code in filtered["Customer_Code"].astype(str).tolist():
-            st.session_state.select_state[code] = False
-
-# Build a selection table
-sel_df = filtered.copy()
-sel_df["Select"] = sel_df["Customer_Code"].astype(str).map(st.session_state.select_state).fillna(True)
-
-display_cols = [
-    "Select", "Customer_Name", "City", "Pin_Code",
-    "Weekly_Generation_MT", "Monthly_Generation_MT", "Generation_MT"
-]
-
-edited = st.data_editor(
-    sel_df[display_cols],
-    hide_index=True,
-    use_container_width=True,
-    column_config={
-        "Select": st.column_config.CheckboxColumn(required=True),
-        "Weekly_Generation_MT": st.column_config.NumberColumn(format="%.2f"),
-        "Monthly_Generation_MT": st.column_config.NumberColumn(format="%.2f"),
-        "Generation_MT": st.column_config.NumberColumn(format="%.2f"),
-    },
-    height=360
+selected_options = st.sidebar.multiselect(
+    "Select workshops (type to search)",
+    options=options,
+    default=[opt for opt in options if opt[0] in st.session_state.selected_codes],
+    format_func=lambda x: f"{x[1]} ({x[0]})"
 )
 
-# Write selection back into session state
-# We need to align edited rows back to Customer_Code; easiest is to use filtered order
-for i, code in enumerate(filtered["Customer_Code"].astype(str).tolist()):
-    st.session_state.select_state[code] = bool(edited.iloc[i]["Select"])
+selected_codes = [c for c, _ in selected_options]
+st.session_state.selected_codes = selected_codes
 
-selected = filtered[filtered["Customer_Code"].astype(str).map(st.session_state.select_state).fillna(False)].copy()
+# Apply manual selection (this replaces the old name search)
+f = filtered[filtered["Customer_Code"].astype(str).isin(set(selected_codes))].copy()
 
-st.caption(f"Selected workshops: {len(selected)}")
+# ---------------- KPIs (as before) ----------------
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Workshops (selected)", len(f))
+c2.metric("Annual total (MT)", f"{f['Generation_MT'].sum():.2f}")
+c3.metric("Monthly total (MT)", f"{f['Monthly_Generation_MT'].sum():.2f}")
+c4.metric("Weekly total (MT)", f"{f['Weekly_Generation_MT'].sum():.2f}")
 
-st.divider()
-
-# ---------------- Map + Route ----------------
-# Plot points = selected (not just filtered)
-selected_plot = apply_jitter(selected, jitter_m=float(jitter_m))
-
-# Route state
+# ---------------- Route state ----------------
 if "route_result" not in st.session_state:
-    st.session_state.route_result = None  # dict with route_df, km, etc.
+    st.session_state.route_result = None
 
-colA, colB = st.columns([1, 2], vertical_alignment="top")
-with colA:
-    run_route = st.button("Optimize route (selected)")
+btn1, btn2 = st.columns([1, 6])
+with btn1:
+    run_route = st.button("Optimize route")
+with btn2:
     clear_route = st.button("Clear route")
 
 if clear_route:
@@ -344,24 +319,24 @@ route_km = None
 route_order_df = None
 
 if run_route:
-    if len(selected) < 1:
-        st.warning("Select at least 1 workshop.")
+    if len(f) < 1:
+        st.warning("Select at least 1 workshop in the left panel.")
     else:
-        ordered = pd.concat([pd.DataFrame([depot]), selected], ignore_index=True).reset_index(drop=True)
+        ordered = pd.concat([pd.DataFrame([depot]), f], ignore_index=True).reset_index(drop=True)
         coords = list(zip(ordered["Latitude"].astype(float), ordered["Longitude"].astype(float)))
+
         route_nodes, objective_m, dummy_end = solve_open_route_from_depot(coords, seconds=2)
 
         if route_nodes is None:
-            st.error("Route solve failed. Try selecting fewer points (e.g., Top N smaller).")
+            st.error("Route solve failed. Try selecting fewer points.")
         else:
-            # remove dummy end
             route_nodes = [n for n in route_nodes if n != dummy_end]
             route_order_df = ordered.iloc[route_nodes].reset_index(drop=True)
             route_km = objective_m / 1000.0
 
-            # For drawing the route, use jittered coords for selected points (visual)
-            lut = dict(zip(selected_plot["Customer_Code"].astype(str),
-                           zip(selected_plot["Lat_plot"], selected_plot["Lon_plot"])))
+            # Plot line using jittered coords for workshops
+            f_plot = apply_jitter(f, jitter_m=float(jitter_m))
+            lut = dict(zip(f_plot["Customer_Code"].astype(str), zip(f_plot["Lat_plot"], f_plot["Lon_plot"])))
 
             route_lat_plot, route_lon_plot = [], []
             for _, row in route_order_df.iterrows():
@@ -382,20 +357,21 @@ if run_route:
                 "route_df_plot": route_df_plot,
             }
 
-# If route already computed, reuse it
+# reuse saved route if available
 if st.session_state.route_result is not None and route_df_plot is None:
     route_km = st.session_state.route_result["route_km"]
     route_order_df = st.session_state.route_result["route_order_df"]
     route_df_plot = st.session_state.route_result["route_df_plot"]
 
-with colB:
-    fig = build_map(depot, selected_plot, route_df_plot=route_df_plot)
-    st.subheader("Map (selected workshops)")
-    st.plotly_chart(fig, use_container_width=True)
+# ---------------- Map (center) ----------------
+f_plot = apply_jitter(f, jitter_m=float(jitter_m))
+fig = build_map(depot, f_plot, route_df_plot=route_df_plot)
+st.subheader("Map")
+st.plotly_chart(fig, use_container_width=True)
 
+# ---------------- Route outputs (below map, as before) ----------------
 if route_km is not None:
     st.success(f"One-way distance (approx, straight-line): {route_km:.1f} km")
-
     st.subheader("Route order")
     st.dataframe(
         route_order_df[["Customer_Name", "City", "Pin_Code", "Weekly_Generation_MT", "Monthly_Generation_MT", "Generation_MT"]],
@@ -403,9 +379,17 @@ if route_km is not None:
         hide_index=True
     )
 
-# Download selected list
-st.subheader("Download")
-dl_cols = ["Customer_Code", "Customer_Name", "City", "Pin_Code",
-           "Generation_MT", "Monthly_Generation_MT", "Weekly_Generation_MT", "Geocode_Status"]
-csv = selected[dl_cols].to_csv(index=False).encode("utf-8")
+# ---------------- Table + Download (below) ----------------
+st.subheader("Selected workshops")
+show_cols = [
+    "Customer_Code", "Customer_Name", "City", "Pin_Code",
+    "Generation_MT", "Monthly_Generation_MT", "Weekly_Generation_MT", "Geocode_Status"
+]
+st.dataframe(
+    f[show_cols].sort_values("Generation_MT", ascending=False).reset_index(drop=True),
+    use_container_width=True,
+    height=420
+)
+
+csv = f[show_cols].to_csv(index=False).encode("utf-8")
 st.download_button("Download selected workshops CSV", data=csv, file_name="selected_workshops.csv", mime="text/csv")
