@@ -22,7 +22,6 @@ st.markdown(
       /* Bigger text everywhere */
       html, body, [class*="css"] {{ font-size: 18.5px !important; }}
 
-      /* Title */
       .title {{
         font-size: 36px;
         font-weight: 900;
@@ -36,7 +35,6 @@ st.markdown(
         margin-bottom: 1rem;
       }}
 
-      /* Sidebar widget labels */
       section[data-testid="stSidebar"] label, section[data-testid="stSidebar"] p {{
         font-size: 16.5px !important;
       }}
@@ -86,6 +84,16 @@ st.markdown(
         color: white;
       }}
 
+      /* Secondary button style */
+      .secondary-btn > button {{
+        background: white !important;
+        color: {DARK_BLUE} !important;
+        border: 1px solid rgba(10,35,101,0.25) !important;
+      }}
+      .secondary-btn > button:hover {{
+        background: rgba(10,35,101,0.06) !important;
+      }}
+
       section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 {{
         color: {DARK_BLUE};
       }}
@@ -99,7 +107,7 @@ st.markdown(
 # ---------------- Header ----------------
 st.markdown('<div class="title">Used Oil Collection Pilot — Maharashtra</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="subtitle">Filter workshops by volume, select exact names (tick/untick), and generate a one-way milk-run route from the depot.</div>',
+    '<div class="subtitle">Filter workshops by volume/name, select a cluster on the map, and generate a one-way milk-run route from the depot.</div>',
     unsafe_allow_html=True
 )
 
@@ -145,11 +153,6 @@ def build_distance_matrix(coords):
 
 
 def solve_open_route_from_depot(coords, seconds=2):
-    """
-    One-way milk run:
-    Start at depot (index 0), visit all points, end anywhere.
-    Implement with dummy end node with zero inbound cost.
-    """
     n = len(coords)
     dummy_end = n
     coords2 = coords + [coords[0]]
@@ -236,12 +239,12 @@ def scale_sizes(values, min_size=12, max_size=30):
     return (min_size + x * (max_size - min_size)).to_numpy()
 
 
-def kpi_cards(workshops_count, weekly_mt, monthly_mt, annual_mt):
+def kpi_cards(workshops_count, weekly_mt, monthly_mt, annual_mt, title_suffix=""):
     st.markdown(
         f"""
         <div class="kpi-wrap">
           <div class="kpi dark">
-            <div class="label">Workshops (filtered)</div>
+            <div class="label">Workshops{title_suffix}</div>
             <div class="value">{workshops_count}</div>
           </div>
           <div class="kpi">
@@ -261,6 +264,12 @@ def kpi_cards(workshops_count, weekly_mt, monthly_mt, annual_mt):
         unsafe_allow_html=True
     )
 
+
+# ---------------- Session state for cluster selection ----------------
+if "cluster_mode" not in st.session_state:
+    st.session_state.cluster_mode = False
+if "cluster_selected_codes" not in st.session_state:
+    st.session_state.cluster_selected_codes = None  # None means no cluster filter applied
 
 # ---------------- Load and split depot ----------------
 df = load_excel(uploaded)
@@ -282,13 +291,11 @@ weekly_min  = st.sidebar.number_input("Weekly ≥ (MT)", 0.0, value=0.0)
 
 top_n = st.sidebar.number_input("Top N by Annual (0 = all)", 0, value=0, step=5)
 
-# Excel-like tick/untick selection
 st.sidebar.subheader("Search / Select workshops")
 
 all_names = sorted(sites["Customer_Name"].dropna().astype(str).unique().tolist())
-default_selected = all_names  # default: all selected
+default_selected = all_names
 
-# Persistent selection in session_state
 if "selected_names" not in st.session_state:
     st.session_state.selected_names = default_selected
 
@@ -314,30 +321,36 @@ jitter_m = st.sidebar.slider("Jitter meters", 0, 800, 140) if use_jitter else 0
 # ---------------- Apply filters ----------------
 f = sites.copy()
 
-# Apply name tick/untick filter
+# Name selection
 if selected_names:
     f = f[f["Customer_Name"].isin(selected_names)]
 else:
-    # if nothing selected, show empty
     f = f.iloc[0:0]
 
-# Apply volume filters
+# Volume filters
 f = f[
     (f["Generation_MT"] >= annual_min) &
     (f["Monthly_Generation_MT"] >= monthly_min) &
     (f["Weekly_Generation_MT"] >= weekly_min)
 ]
 
+# Top N
 if top_n > 0:
     f = f.sort_values("Generation_MT", ascending=False).head(int(top_n))
 
+# Apply cluster filter if exists (this is the "selected area")
+if st.session_state.cluster_selected_codes is not None:
+    f = f[f["Customer_Code"].astype(str).isin(st.session_state.cluster_selected_codes)]
+
+# Totals (post all filters including cluster)
 weekly_total = float(f["Weekly_Generation_MT"].sum()) if len(f) else 0.0
 monthly_total = float(f["Monthly_Generation_MT"].sum()) if len(f) else 0.0
 annual_total = float(f["Generation_MT"].sum()) if len(f) else 0.0
 
-kpi_cards(len(f), weekly_total, monthly_total, annual_total)
+suffix = " (selected cluster)" if st.session_state.cluster_selected_codes is not None else " (filtered)"
+kpi_cards(len(f), weekly_total, monthly_total, annual_total, title_suffix=suffix)
 
-# Plot data (with jitter for visualization)
+# Plot data (with jitter)
 f_plot = apply_jitter(f, jitter_m)
 sizes = scale_sizes(f_plot["Weekly_Generation_MT"], min_size=12, max_size=30)
 
@@ -345,6 +358,28 @@ plot_lut = dict(zip(
     f_plot["Customer_Code"].astype(str),
     zip(f_plot["Lat_plot"].astype(float), f_plot["Lon_plot"].astype(float))
 ))
+
+# ---------------- Top controls: Select Cluster / Clear Selection ----------------
+t1, t2, t3 = st.columns([1.2, 1.2, 3.6], vertical_alignment="center")
+
+with t1:
+    if st.button("Select Cluster", key="btn_cluster_mode"):
+        st.session_state.cluster_mode = True
+
+with t2:
+    # Secondary styled button
+    st.markdown('<div class="secondary-btn">', unsafe_allow_html=True)
+    clear = st.button("Clear Selection", key="btn_clear_cluster")
+    st.markdown("</div>", unsafe_allow_html=True)
+    if clear:
+        st.session_state.cluster_selected_codes = None
+        st.session_state.cluster_mode = False
+
+with t3:
+    if st.session_state.cluster_mode:
+        st.info("Cluster mode ON: use Box Select or Lasso Select on the map to select a region. (Top-right tool icons on the map)")
+    else:
+        st.caption("Tip: Click 'Select Cluster' to draw a box/lasso on the map and filter to that area.")
 
 # ---------------- Map ----------------
 fig = go.Figure()
@@ -360,6 +395,7 @@ if len(f_plot) > 0:
         textfont=dict(size=15, color=BLUE),
         hovertext=f_plot["Customer_Name"],
         customdata=np.stack([
+            f_plot["Customer_Code"].astype(str),
             f_plot["City"],
             f_plot["Pin_Code"],
             f_plot["Generation_MT"],
@@ -368,11 +404,11 @@ if len(f_plot) > 0:
         ], axis=1),
         hovertemplate=(
             "<b>%{hovertext}</b><br>"
-            "City: %{customdata[0]}<br>"
-            "Pin: %{customdata[1]}<br>"
-            "Annual: %{customdata[2]:.2f} MT<br>"
-            "Monthly: %{customdata[3]:.2f} MT<br>"
-            "Weekly: %{customdata[4]:.2f} MT<br>"
+            "City: %{customdata[1]}<br>"
+            "Pin: %{customdata[2]}<br>"
+            "Annual: %{customdata[3]:.2f} MT<br>"
+            "Monthly: %{customdata[4]:.2f} MT<br>"
+            "Weekly: %{customdata[5]:.2f} MT<br>"
             "<extra></extra>"
         ),
         name="Workshops"
@@ -391,15 +427,64 @@ fig.add_trace(go.Scattermapbox(
     name="Depot"
 ))
 
+# Drag mode only in cluster mode (lets you box/lasso)
+dragmode = "lasso" if st.session_state.cluster_mode else "pan"
+
 fig.update_layout(
     mapbox=dict(
         style="open-street-map",
         center=dict(lat=float(depot["Latitude"]) - 0.4, lon=float(depot["Longitude"]) + 0.1),
         zoom=6.8
     ),
+    dragmode=dragmode,
     margin=dict(l=0, r=0, t=0, b=0),
     height=620
 )
+
+# Framed container
+st.markdown(
+    """
+    <div style="
+        border:1px solid rgba(10,35,101,0.12);
+        border-radius:14px;
+        padding:6px;
+        box-shadow:0 6px 18px rgba(10,35,101,0.06);
+        margin-bottom:8px;
+    ">
+    """,
+    unsafe_allow_html=True
+)
+
+# Selection capture: only when cluster mode ON
+selection = None
+if st.session_state.cluster_mode:
+    # NOTE: Requires Streamlit that supports plotly selection callbacks
+    selection = st.plotly_chart(
+        fig,
+        use_container_width=True,
+        on_select="rerun",
+        selection_mode=("lasso", "box"),
+    )
+else:
+    st.plotly_chart(fig, use_container_width=True)
+
+st.markdown("</div>", unsafe_allow_html=True)
+
+# If user made a selection, store selected codes and exit cluster mode
+if st.session_state.cluster_mode and selection is not None:
+    try:
+        pts = selection.get("selection", {}).get("points", [])
+        if pts:
+            idxs = [p["point_index"] for p in pts if "point_index" in p]
+            idxs = sorted(set(idxs))
+            if idxs:
+                selected_codes = f_plot.iloc[idxs]["Customer_Code"].astype(str).tolist()
+                st.session_state.cluster_selected_codes = selected_codes
+                st.session_state.cluster_mode = False
+                st.rerun()
+    except Exception:
+        # If selection format differs, do nothing (safe)
+        pass
 
 # ---------------- Route optimization ----------------
 c1, c2 = st.columns([1, 3], vertical_alignment="center")
@@ -426,6 +511,7 @@ if run_route:
             route_df = ordered.iloc[route_nodes].reset_index(drop=True)
             route_km = obj_m / 1000.0
 
+            # Rebuild the line on the SAME map (need to redraw map with line)
             line_lat, line_lon = [], []
             for _, r in route_df.iterrows():
                 code = str(r["Customer_Code"])
@@ -445,21 +531,21 @@ if run_route:
                 name="Optimized route"
             ))
 
-# framed map container
-st.markdown(
-    """
-    <div style="
-        border:1px solid rgba(10,35,101,0.12);
-        border-radius:14px;
-        padding:6px;
-        box-shadow:0 6px 18px rgba(10,35,101,0.06);
-        margin-bottom:8px;
-    ">
-    """,
-    unsafe_allow_html=True
-)
-st.plotly_chart(fig, use_container_width=True)
-st.markdown("</div>", unsafe_allow_html=True)
+            # Show updated map (still single map)
+            st.markdown(
+                """
+                <div style="
+                    border:1px solid rgba(10,35,101,0.12);
+                    border-radius:14px;
+                    padding:6px;
+                    box-shadow:0 6px 18px rgba(10,35,101,0.06);
+                    margin-bottom:8px;
+                ">
+                """,
+                unsafe_allow_html=True
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            st.markdown("</div>", unsafe_allow_html=True)
 
 if route_km is not None:
     st.success(f"One-way distance (approx): {route_km:.1f} km")
