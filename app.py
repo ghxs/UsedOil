@@ -5,6 +5,7 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
+from streamlit_plotly_events import plotly_events
 
 # ---------------- Brand colors ----------------
 ORANGE = "#F26522"
@@ -22,7 +23,6 @@ st.markdown(
       /* Bigger text everywhere */
       html, body, [class*="css"] {{ font-size: 18.5px !important; }}
 
-      /* Title */
       .title {{
         font-size: 36px;
         font-weight: 900;
@@ -36,7 +36,6 @@ st.markdown(
         margin-bottom: 1rem;
       }}
 
-      /* Sidebar widget labels */
       section[data-testid="stSidebar"] label, section[data-testid="stSidebar"] p {{
         font-size: 16.5px !important;
       }}
@@ -71,7 +70,6 @@ st.markdown(
         line-height: 1.1;
       }}
 
-      /* Buttons */
       .stButton > button {{
         background: {ORANGE};
         color: white;
@@ -86,20 +84,15 @@ st.markdown(
         color: white;
       }}
 
-      section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 {{
-        color: {DARK_BLUE};
-      }}
-
       thead tr th {{ font-weight: 800 !important; }}
     </style>
     """,
     unsafe_allow_html=True
 )
 
-# ---------------- Header ----------------
 st.markdown('<div class="title">Used Oil Collection Pilot — Maharashtra</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="subtitle">Filter workshops by volume, select exact names (tick/untick), and generate a one-way milk-run route from the depot.</div>',
+    '<div class="subtitle">Filter workshops by volume, select exact names (tick/untick), and use box/lasso on the map to create a “cluster selection”.</div>',
     unsafe_allow_html=True
 )
 
@@ -145,11 +138,6 @@ def build_distance_matrix(coords):
 
 
 def solve_open_route_from_depot(coords, seconds=2):
-    """
-    One-way milk run:
-    Start at depot (index 0), visit all points, end anywhere.
-    Implement with dummy end node with zero inbound cost.
-    """
     n = len(coords)
     dummy_end = n
     coords2 = coords + [coords[0]]
@@ -187,7 +175,7 @@ def solve_open_route_from_depot(coords, seconds=2):
     while not routing.IsEnd(idx):
         route_nodes.append(manager.IndexToNode(idx))
         idx = sol.Value(routing.NextVar(idx))
-    route_nodes.append(manager.IndexToNode(idx))  # dummy end
+    route_nodes.append(manager.IndexToNode(idx))
 
     return route_nodes, sol.ObjectiveValue(), dummy_end
 
@@ -279,16 +267,12 @@ st.sidebar.header("Filters")
 annual_min = st.sidebar.number_input("Annual ≥ (MT)", 0.0, value=0.0)
 monthly_min = st.sidebar.number_input("Monthly ≥ (MT)", 0.0, value=0.0)
 weekly_min  = st.sidebar.number_input("Weekly ≥ (MT)", 0.0, value=0.0)
-
 top_n = st.sidebar.number_input("Top N by Annual (0 = all)", 0, value=0, step=5)
 
-# Excel-like tick/untick selection
 st.sidebar.subheader("Search / Select workshops")
-
 all_names = sorted(sites["Customer_Name"].dropna().astype(str).unique().tolist())
-default_selected = all_names  # default: all selected
+default_selected = all_names
 
-# Persistent selection in session_state
 if "selected_names" not in st.session_state:
     st.session_state.selected_names = default_selected
 
@@ -311,17 +295,23 @@ st.sidebar.header("Map display")
 use_jitter = st.sidebar.checkbox("Jitter overlapping pins", True)
 jitter_m = st.sidebar.slider("Jitter meters", 0, 800, 140) if use_jitter else 0
 
+st.sidebar.subheader("Map cluster selection")
+enable_select = st.sidebar.checkbox("Enable cluster select (box/lasso)", value=False)
+
+# persist selected codes
+if "map_selected_codes" not in st.session_state:
+    st.session_state.map_selected_codes = []
+
+if st.sidebar.button("Clear map selection"):
+    st.session_state.map_selected_codes = []
+
 # ---------------- Apply filters ----------------
 f = sites.copy()
-
-# Apply name tick/untick filter
 if selected_names:
     f = f[f["Customer_Name"].isin(selected_names)]
 else:
-    # if nothing selected, show empty
     f = f.iloc[0:0]
 
-# Apply volume filters
 f = f[
     (f["Generation_MT"] >= annual_min) &
     (f["Monthly_Generation_MT"] >= monthly_min) &
@@ -346,9 +336,10 @@ plot_lut = dict(zip(
     zip(f_plot["Lat_plot"].astype(float), f_plot["Lon_plot"].astype(float))
 ))
 
-# ---------------- Map ----------------
+# ---------------- Build map figure ----------------
 fig = go.Figure()
 
+# Workshops trace FIRST (important for selection indexing)
 if len(f_plot) > 0:
     fig.add_trace(go.Scattermapbox(
         lat=f_plot["Lat_plot"],
@@ -360,6 +351,7 @@ if len(f_plot) > 0:
         textfont=dict(size=15, color=BLUE),
         hovertext=f_plot["Customer_Name"],
         customdata=np.stack([
+            f_plot["Customer_Code"],  # keep code for selection mapping
             f_plot["City"],
             f_plot["Pin_Code"],
             f_plot["Generation_MT"],
@@ -368,16 +360,17 @@ if len(f_plot) > 0:
         ], axis=1),
         hovertemplate=(
             "<b>%{hovertext}</b><br>"
-            "City: %{customdata[0]}<br>"
-            "Pin: %{customdata[1]}<br>"
-            "Annual: %{customdata[2]:.2f} MT<br>"
-            "Monthly: %{customdata[3]:.2f} MT<br>"
-            "Weekly: %{customdata[4]:.2f} MT<br>"
+            "City: %{customdata[1]}<br>"
+            "Pin: %{customdata[2]}<br>"
+            "Annual: %{customdata[3]:.2f} MT<br>"
+            "Monthly: %{customdata[4]:.2f} MT<br>"
+            "Weekly: %{customdata[5]:.2f} MT<br>"
             "<extra></extra>"
         ),
         name="Workshops"
     ))
 
+# Depot trace
 fig.add_trace(go.Scattermapbox(
     lat=[float(depot["Latitude"])],
     lon=[float(depot["Longitude"])],
@@ -398,54 +391,12 @@ fig.update_layout(
         zoom=6.8
     ),
     margin=dict(l=0, r=0, t=0, b=0),
-    height=620
+    height=620,
+    # make selection easier
+    dragmode="lasso" if enable_select else "pan"
 )
 
-# ---------------- Route optimization ----------------
-c1, c2 = st.columns([1, 3], vertical_alignment="center")
-with c1:
-    run_route = st.button("Optimize route (draw line)")
-
-route_df = None
-route_km = None
-
-if run_route:
-    if len(f) < 1:
-        st.warning("No workshops selected.")
-    elif len(f) == 1:
-        st.info("Only 1 workshop selected. No route line needed.")
-    else:
-        ordered = pd.concat([pd.DataFrame([depot]), f], ignore_index=True).reset_index(drop=True)
-        coords = list(zip(ordered["Latitude"].astype(float), ordered["Longitude"].astype(float)))
-
-        route_nodes, obj_m, dummy_end = solve_open_route_from_depot(coords, seconds=2)
-        if route_nodes is None:
-            st.error("Route solve failed. Try reducing Top N.")
-        else:
-            route_nodes = [n for n in route_nodes if n != dummy_end]
-            route_df = ordered.iloc[route_nodes].reset_index(drop=True)
-            route_km = obj_m / 1000.0
-
-            line_lat, line_lon = [], []
-            for _, r in route_df.iterrows():
-                code = str(r["Customer_Code"])
-                if "DEPOT_ABC" in code:
-                    line_lat.append(float(depot["Latitude"]))
-                    line_lon.append(float(depot["Longitude"]))
-                else:
-                    latlon = plot_lut.get(code, (float(r["Latitude"]), float(r["Longitude"])))
-                    line_lat.append(latlon[0])
-                    line_lon.append(latlon[1])
-
-            fig.add_trace(go.Scattermapbox(
-                lat=line_lat,
-                lon=line_lon,
-                mode="lines",
-                line=dict(width=5, color=DARK_BLUE),
-                name="Optimized route"
-            ))
-
-# framed map container
+# ---------------- Render map with selection capture ----------------
 st.markdown(
     """
     <div style="
@@ -458,22 +409,137 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-st.plotly_chart(fig, use_container_width=True)
-st.markdown("</div>", unsafe_allow_html=True)
 
-if route_km is not None:
-    st.success(f"One-way distance (approx): {route_km:.1f} km")
-    st.subheader("Route order")
-    st.dataframe(
-        route_df[["Customer_Name", "City", "Pin_Code",
-                  "Weekly_Generation_MT", "Monthly_Generation_MT", "Generation_MT"]]
-        .reset_index(drop=True),
-        use_container_width=True,
-        height=320
+if enable_select:
+    st.info("Selection mode ON: use the map toolbar → Box Select / Lasso Select, then drag on the map.")
+    selected = plotly_events(
+        fig,
+        select_event=True,
+        click_event=False,
+        hover_event=False,
+        override_height=620,
+        config={
+            "scrollZoom": True,
+            "displaylogo": False,
+            "modeBarButtonsToAdd": ["select2d", "lasso2d"],
+        },
+        key="plot_select"
     )
 
-# ---------------- Table + Download ----------------
+    # selected is a list of dicts; pointIndex maps to row in the workshops trace (trace 0)
+    if selected:
+        idxs = []
+        for p in selected:
+            # ensure it's from workshops trace (curveNumber==0)
+            if p.get("curveNumber", 0) == 0 and "pointIndex" in p:
+                idxs.append(int(p["pointIndex"]))
+        idxs = sorted(set(idxs))
+
+        if idxs:
+            codes = f_plot.iloc[idxs]["Customer_Code"].astype(str).tolist()
+            st.session_state.map_selected_codes = sorted(set(codes))
+
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.plotly_chart(fig, use_container_width=True)
+
+st.markdown("</div>", unsafe_allow_html=True)
+
+# ---------------- Selected cluster details ----------------
+selected_codes = st.session_state.map_selected_codes
+selected_df = f[f["Customer_Code"].astype(str).isin(selected_codes)].copy() if selected_codes else f.iloc[0:0].copy()
+
+st.subheader("Selected cluster (from map)")
+if len(selected_df) == 0:
+    st.caption("No map selection yet. Turn on cluster select and box/lasso some pins.")
+else:
+    cA, cB, cC, cD = st.columns(4)
+    cA.metric("Selected workshops", len(selected_df))
+    cB.metric("Weekly MT", round(float(selected_df["Weekly_Generation_MT"].sum()), 2))
+    cC.metric("Monthly MT", round(float(selected_df["Monthly_Generation_MT"].sum()), 2))
+    cD.metric("Annual MT", round(float(selected_df["Generation_MT"].sum()), 2))
+
+    st.dataframe(
+        selected_df[["Customer_Name", "City", "Pin_Code", "Weekly_Generation_MT", "Monthly_Generation_MT", "Generation_MT"]]
+        .sort_values("Generation_MT", ascending=False)
+        .reset_index(drop=True),
+        use_container_width=True,
+        height=350
+    )
+
+# ---------------- Route optimization ----------------
+st.divider()
+st.subheader("Route optimization (one-way milk run from depot)")
+
+route_scope = st.radio(
+    "Optimize route for",
+    options=["Filtered set", "Selected cluster"],
+    horizontal=True,
+    index=1 if len(selected_df) > 0 else 0
+)
+
+run_route = st.button("Optimize route (draw line)")
+
+if run_route:
+    if route_scope == "Selected cluster":
+        base = selected_df.copy()
+    else:
+        base = f.copy()
+
+    if len(base) < 1:
+        st.warning("No workshops available in this scope.")
+    elif len(base) == 1:
+        st.info("Only 1 workshop in this scope. No route line needed.")
+    else:
+        ordered = pd.concat([pd.DataFrame([depot]), base], ignore_index=True).reset_index(drop=True)
+        coords = list(zip(ordered["Latitude"].astype(float), ordered["Longitude"].astype(float)))
+
+        route_nodes, obj_m, dummy_end = solve_open_route_from_depot(coords, seconds=2)
+        if route_nodes is None:
+            st.error("Route solve failed. Try reducing Top N / selection size.")
+        else:
+            route_nodes = [n for n in route_nodes if n != dummy_end]
+            route_df = ordered.iloc[route_nodes].reset_index(drop=True)
+            route_km = obj_m / 1000.0
+
+            # Add the line to a fresh figure (so selection mode doesn’t get messy)
+            fig_route = fig
+
+            line_lat, line_lon = [], []
+            for _, r in route_df.iterrows():
+                code = str(r["Customer_Code"])
+                if "DEPOT_ABC" in code:
+                    line_lat.append(float(depot["Latitude"]))
+                    line_lon.append(float(depot["Longitude"]))
+                else:
+                    latlon = plot_lut.get(code, (float(r["Latitude"]), float(r["Longitude"])))
+                    line_lat.append(latlon[0])
+                    line_lon.append(latlon[1])
+
+            fig_route.add_trace(go.Scattermapbox(
+                lat=line_lat,
+                lon=line_lon,
+                mode="lines",
+                line=dict(width=5, color=DARK_BLUE),
+                name="Optimized route"
+            ))
+
+            st.success(f"One-way distance (approx): {route_km:.1f} km")
+            st.plotly_chart(fig_route, use_container_width=True)
+
+            st.subheader("Route order")
+            st.dataframe(
+                route_df[["Customer_Name", "City", "Pin_Code", "Weekly_Generation_MT",
+                          "Monthly_Generation_MT", "Generation_MT"]]
+                .reset_index(drop=True),
+                use_container_width=True,
+                height=320
+            )
+
+# ---------------- Full filtered list + download ----------------
+st.divider()
 st.subheader("Filtered list")
+
 show_cols = [
     "Customer_Code", "Customer_Name", "City", "Pin_Code",
     "Generation_MT", "Monthly_Generation_MT", "Weekly_Generation_MT", "Geocode_Status"
