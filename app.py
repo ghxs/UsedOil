@@ -268,8 +268,10 @@ def circle_latlon(center_lat, center_lon, radius_km, n=120):
     for i in range(n + 1):
         brng = 2 * math.pi * (i / n)
         lat2 = math.asin(math.sin(lat1) * math.cos(d) + math.cos(lat1) * math.sin(d) * math.cos(brng))
-        lon2 = lon1 + math.atan2(math.sin(brng) * math.sin(d) * math.cos(lat1),
-                                 math.cos(d) - math.sin(lat1) * math.sin(lat2))
+        lon2 = lon1 + math.atan2(
+            math.sin(brng) * math.sin(d) * math.cos(lat1),
+            math.cos(d) - math.sin(lat1) * math.sin(lat2)
+        )
         lats.append(math.degrees(lat2))
         lons.append(math.degrees(lon2))
     return lats, lons
@@ -329,23 +331,23 @@ st.sidebar.header("Map display")
 use_jitter = st.sidebar.checkbox("Jitter overlapping pins", True)
 jitter_m = st.sidebar.slider("Jitter meters", 0, 800, 140) if use_jitter else 0
 
-# ---------------- Apply filters ----------------
-f = sites.copy()
+# ---------------- Build "base_f" (filters BEFORE circle selection) ----------------
+base_f = sites.copy()
 if selected_names:
-    f = f[f["Customer_Name"].isin(selected_names)]
+    base_f = base_f[base_f["Customer_Name"].isin(selected_names)]
 else:
-    f = f.iloc[0:0]
+    base_f = base_f.iloc[0:0]
 
-f = f[
-    (f["Generation_MT"] >= annual_min) &
-    (f["Monthly_Generation_MT"] >= monthly_min) &
-    (f["Weekly_Generation_MT"] >= weekly_min)
+base_f = base_f[
+    (base_f["Generation_MT"] >= annual_min) &
+    (base_f["Monthly_Generation_MT"] >= monthly_min) &
+    (base_f["Weekly_Generation_MT"] >= weekly_min)
 ]
-
 if top_n > 0:
-    f = f.sort_values("Generation_MT", ascending=False).head(int(top_n))
+    base_f = base_f.sort_values("Generation_MT", ascending=False).head(int(top_n))
 
 # Apply circle selection if exists
+f = base_f.copy()
 if st.session_state.circle_selected_codes is not None:
     f = f[f["Customer_Code"].astype(str).isin(st.session_state.circle_selected_codes)]
 
@@ -356,7 +358,7 @@ annual_total = float(f["Generation_MT"].sum()) if len(f) else 0.0
 suffix = " (selected circle)" if st.session_state.circle_selected_codes is not None else " (filtered)"
 kpi_cards(len(f), weekly_total, monthly_total, annual_total, title_suffix=suffix)
 
-# Plot data (jitter)
+# Plot data for map (always show current f)
 f_plot = apply_jitter(f, jitter_m)
 sizes = scale_sizes(f_plot["Weekly_Generation_MT"], min_size=12, max_size=30)
 
@@ -365,8 +367,8 @@ plot_lut = dict(zip(
     zip(f_plot["Lat_plot"].astype(float), f_plot["Lon_plot"].astype(float))
 ))
 
-# ---------------- Top controls: Circle Select / Clear ----------------
-t1, t2, t3, t4 = st.columns([1.2, 1.2, 1.5, 2.1], vertical_alignment="center")
+# ---------------- Top controls ----------------
+t1, t2, t3, t4 = st.columns([1.4, 1.2, 1.7, 2.7], vertical_alignment="center")
 
 with t1:
     if st.button("Select Cluster (Circle)", key="btn_circle_mode"):
@@ -382,9 +384,10 @@ with t2:
         st.session_state.circle_selected_codes = None
         st.session_state.circle_center = None
         st.session_state.circle_mode = False
+        st.rerun()
 
 with t3:
-    if st.session_state.circle_mode:
+    if st.session_state.circle_mode or st.session_state.circle_selected_codes is not None:
         st.session_state.circle_radius_km = st.slider(
             "Radius (km)",
             min_value=5,
@@ -395,11 +398,11 @@ with t3:
 
 with t4:
     if st.session_state.circle_mode:
-        st.info("Circle mode ON: click any workshop pin to set center, then adjust radius.")
+        st.info("Circle mode ON: click a workshop pin to set center, then adjust radius. It will select all within radius.")
     else:
-        st.caption("Tip: Use 'Select Cluster (Circle)' to filter workshops in a radius.")
+        st.caption("Tip: Use 'Select Cluster (Circle)' to filter workshops within a radius.")
 
-# ---------------- Map ----------------
+# ---------------- Map figure ----------------
 fig = go.Figure()
 
 # Workshops
@@ -447,12 +450,13 @@ fig.add_trace(go.Scattermapbox(
     name="Depot"
 ))
 
-# If circle mode OR circle applied, draw circle
+# Circle drawing (if active)
 circle_center = st.session_state.circle_center
-circle_radius_km = float(st.session_state.circle_radius_km)
+radius_km = float(st.session_state.circle_radius_km)
 
 if circle_center is not None and (st.session_state.circle_mode or st.session_state.circle_selected_codes is not None):
-    clats, ক্লons = circle_latlon(circle_center[0], circle_center[1], circle_radius_km, n=140)
+    clats, clons = circle_latlon(circle_center[0], circle_center[1], radius_km, n=140)
+
     fig.add_trace(go.Scattermapbox(
         lat=clats,
         lon=clons,
@@ -494,9 +498,6 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# Capture click to set circle center (using plotly selection callback)
-# We'll use "on_select" with point selection (single click becomes a point selection on some Streamlit versions).
-# If click selection doesn't register in your Streamlit, tell me — I'll switch to a reliable event component.
 sel = None
 if st.session_state.circle_mode:
     sel = st.plotly_chart(fig, use_container_width=True, on_select="rerun", selection_mode=("points",))
@@ -505,46 +506,30 @@ else:
 
 st.markdown("</div>", unsafe_allow_html=True)
 
-# If in circle mode and user clicked a point, update center + compute selection
+# If in circle mode and a point was clicked, set center, compute selection, apply
 if st.session_state.circle_mode and sel is not None:
     try:
         pts = sel.get("selection", {}).get("points", [])
         if pts:
-            # clicked on workshop point
             p = pts[0]
             idx = p.get("point_index", None)
             curve = p.get("curve_number", None)
 
-            # curve_number 0 is workshops trace (depot is 1, circle lines later)
+            # curve_number 0 -> workshops
             if idx is not None and curve == 0 and len(f_plot) > idx:
                 lat_c = float(f_plot.iloc[idx]["Latitude"])
                 lon_c = float(f_plot.iloc[idx]["Longitude"])
                 st.session_state.circle_center = (lat_c, lon_c)
 
-            # compute which points (in *filtered base sites before circle*) fall within radius
-            # We want selection to work on the currently filtered "f" (before circle applied),
-            # so selection is consistent with your other filters.
-            # At this moment, f already includes circle if previously applied, so rebuild "base_f".
-
-            base_f = sites.copy()
-            if selected_names:
-                base_f = base_f[base_f["Customer_Name"].isin(selected_names)]
-            else:
-                base_f = base_f.iloc[0:0]
-
-            base_f = base_f[
-                (base_f["Generation_MT"] >= annual_min) &
-                (base_f["Monthly_Generation_MT"] >= monthly_min) &
-                (base_f["Weekly_Generation_MT"] >= weekly_min)
-            ]
-            if top_n > 0:
-                base_f = base_f.sort_values("Generation_MT", ascending=False).head(int(top_n))
-
             lat0, lon0 = st.session_state.circle_center
-            dist_km = base_f.apply(lambda r: haversine_km(lat0, lon0, float(r["Latitude"]), float(r["Longitude"])), axis=1)
-            selected = base_f.loc[dist_km <= circle_radius_km, "Customer_Code"].astype(str).tolist()
 
-            st.session_state.circle_selected_codes = selected
+            dist_km = base_f.apply(
+                lambda r: haversine_km(lat0, lon0, float(r["Latitude"]), float(r["Longitude"])),
+                axis=1
+            )
+            selected_codes = base_f.loc[dist_km <= radius_km, "Customer_Code"].astype(str).tolist()
+
+            st.session_state.circle_selected_codes = selected_codes
             st.session_state.circle_mode = False
             st.rerun()
     except Exception:
