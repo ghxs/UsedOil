@@ -19,7 +19,6 @@ st.markdown(
     <style>
       .stApp {{ background: #ffffff; }}
 
-      /* Bigger text everywhere */
       html, body, [class*="css"] {{ font-size: 18.5px !important; }}
 
       .title {{
@@ -39,7 +38,6 @@ st.markdown(
         font-size: 16.5px !important;
       }}
 
-      /* KPI cards */
       .kpi-wrap {{
         display: grid;
         grid-template-columns: repeat(4, 1fr);
@@ -69,7 +67,6 @@ st.markdown(
         line-height: 1.1;
       }}
 
-      /* Buttons */
       .stButton > button {{
         background: {ORANGE};
         color: white;
@@ -84,7 +81,6 @@ st.markdown(
         color: white;
       }}
 
-      /* Secondary button style */
       .secondary-btn > button {{
         background: white !important;
         color: {DARK_BLUE} !important;
@@ -278,7 +274,7 @@ if "cluster_selected_codes" not in st.session_state:
 # ---------------- Load data ----------------
 df = load_excel(uploaded)
 
-# Try to find ABC depot in file (optional)
+# Optional: detect ABC depot from file
 abc_lat, abc_lon = None, None
 abc_name = "ABC Petrochem"
 abc_mask = df["Customer_Code"].astype(str).str.contains("DEPOT_ABC", na=False)
@@ -289,12 +285,11 @@ if abc_mask.any():
     if "Customer_Name" in r and str(r["Customer_Name"]).strip():
         abc_name = str(r["Customer_Name"]).strip()
 
-# Fallback if not present in file (edit these if needed)
+# Fallback if not present in file
 if abc_lat is None or abc_lon is None:
-    # If you know exact coords for ABC, put them here.
-    abc_lat, abc_lon = 19.7260, 72.7487  # fallback approx (can be refined)
+    abc_lat, abc_lon = 19.7260, 72.7487  # fallback approx (edit if needed)
 
-# Two recycler depots (hardcoded, no excel update needed)
+# Two recycler depots (hardcoded)
 recyclers = {
     "ABC Petrochem (Palghar)": {
         "name": abc_name,
@@ -308,7 +303,7 @@ recyclers = {
     }
 }
 
-# Workshops are everything except DEPOT_ABC row if it exists
+# Workshops are everything except DEPOT_ABC row (if it exists)
 sites = df[~abc_mask].copy() if abc_mask.any() else df.copy()
 
 # ---------------- Sidebar filters ----------------
@@ -347,28 +342,23 @@ jitter_m = st.sidebar.slider("Jitter meters", 0, 800, 140) if use_jitter else 0
 # ---------------- Apply filters ----------------
 f = sites.copy()
 
-# Name filter
 if selected_names:
     f = f[f["Customer_Name"].isin(selected_names)]
 else:
     f = f.iloc[0:0]
 
-# Volume filters
 f = f[
     (f["Generation_MT"] >= annual_min) &
     (f["Monthly_Generation_MT"] >= monthly_min) &
     (f["Weekly_Generation_MT"] >= weekly_min)
 ]
 
-# Top N
 if top_n > 0:
     f = f.sort_values("Generation_MT", ascending=False).head(int(top_n))
 
-# Apply cluster selection (if any)
 if st.session_state.cluster_selected_codes is not None:
     f = f[f["Customer_Code"].astype(str).isin(st.session_state.cluster_selected_codes)]
 
-# Totals
 weekly_total = float(f["Weekly_Generation_MT"].sum()) if len(f) else 0.0
 monthly_total = float(f["Monthly_Generation_MT"].sum()) if len(f) else 0.0
 annual_total = float(f["Generation_MT"].sum()) if len(f) else 0.0
@@ -397,10 +387,8 @@ with t3:
         st.caption("Tip: Click 'Select Cluster' to draw a box/lasso on the same map and filter to that region.")
 
 # ---------------- Map points dataset for selection mode ----------------
-# In cluster mode, show ALL workshops (no filters), so you can pick any region easily.
 map_base = sites.copy() if st.session_state.cluster_mode else f.copy()
-
-map_plot = apply_jitter(map_base, jitter_m if not st.session_state.cluster_mode else jitter_m)
+map_plot = apply_jitter(map_base, jitter_m)
 map_sizes = scale_sizes(map_plot["Weekly_Generation_MT"], min_size=12, max_size=30)
 
 # ---------------- Build map ----------------
@@ -436,32 +424,27 @@ if len(map_plot) > 0:
         name="Workshops"
     ))
 
-# Recycler selector (for route + highlight)
+# Route recycler selector
 selected_recycler_label = st.selectbox(
     "Select Recycler for Route Optimization",
     list(recyclers.keys())
 )
 
-# Plot both recycler depots (always visible)
+# Plot BOTH depots in ORANGE (same color)
 for label, rec in recyclers.items():
     fig.add_trace(go.Scattermapbox(
         lat=[rec["lat"]],
         lon=[rec["lon"]],
         mode="markers+text",
-        marker=dict(
-            size=34,
-            color=ORANGE if label == selected_recycler_label else DARK_BLUE,
-            opacity=1
-        ),
+        marker=dict(size=36, color=ORANGE, opacity=1),
         text=["🏭"],
         textposition="top center",
-        textfont=dict(size=18, color=ORANGE if label == selected_recycler_label else DARK_BLUE),
+        textfont=dict(size=18, color=ORANGE),
         hovertext=[rec["name"]],
         hovertemplate="<b>%{hovertext}</b><extra></extra>",
         name=label
     ))
 
-# Drag mode only in cluster mode
 fig.update_layout(
     mapbox=dict(
         style="open-street-map",
@@ -489,7 +472,6 @@ st.markdown(
 
 selection = None
 if st.session_state.cluster_mode:
-    # Requires Streamlit plotly selection support
     selection = st.plotly_chart(
         fig,
         use_container_width=True,
@@ -501,7 +483,7 @@ else:
 
 st.markdown("</div>", unsafe_allow_html=True)
 
-# Capture selected points -> store codes -> exit cluster mode
+# Capture selected points
 if st.session_state.cluster_mode and selection is not None:
     try:
         pts = selection.get("selection", {}).get("points", [])
@@ -523,7 +505,7 @@ with c1:
 route_df = None
 route_km = None
 
-# LUT for jittered drawing for filtered set only (for clean route line)
+# LUT for route drawing (use filtered set)
 f_plot = apply_jitter(f.copy(), jitter_m)
 plot_lut = dict(zip(
     f_plot["Customer_Code"].astype(str),
@@ -571,7 +553,6 @@ if run_route:
                     line_lat.append(latlon[0])
                     line_lon.append(latlon[1])
 
-            # Draw line on SAME map figure (no extra map)
             fig.add_trace(go.Scattermapbox(
                 lat=line_lat,
                 lon=line_lon,
