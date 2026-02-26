@@ -4,4 +4,4 @@ openpyxl
 plotly
 numpy
 ortools
-scikit-learn
+streamlit-plotly-events
