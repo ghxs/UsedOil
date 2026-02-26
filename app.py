@@ -5,7 +5,6 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
-from streamlit_plotly_events import plotly_events
 
 # ---------------- Brand colors ----------------
 ORANGE = "#F26522"
@@ -19,25 +18,30 @@ st.markdown(
     f"""
     <style>
       .stApp {{ background: #ffffff; }}
-      html, body, [class*="css"] {{ font-size: 19px !important; }}
 
+      /* Bigger text everywhere */
+      html, body, [class*="css"] {{ font-size: 18.5px !important; }}
+
+      /* Title */
       .title {{
-        font-size: 38px;
+        font-size: 36px;
         font-weight: 900;
         color: {DARK_BLUE};
         margin-bottom: 0.25rem;
       }}
       .subtitle {{
-        font-size: 18px;
+        font-size: 17px;
         color: #334155;
         margin-top: 0;
         margin-bottom: 1rem;
       }}
 
+      /* Sidebar widget labels */
       section[data-testid="stSidebar"] label, section[data-testid="stSidebar"] p {{
         font-size: 16.5px !important;
       }}
 
+      /* KPI cards */
       .kpi-wrap {{
         display: grid;
         grid-template-columns: repeat(4, 1fr);
@@ -61,12 +65,13 @@ st.markdown(
         font-weight: 700;
       }}
       .kpi .value {{
-        font-size: 30px;
+        font-size: 28px;
         color: #0f172a;
         font-weight: 900;
         line-height: 1.1;
       }}
 
+      /* Buttons */
       .stButton > button {{
         background: {ORANGE};
         color: white;
@@ -81,30 +86,23 @@ st.markdown(
         color: white;
       }}
 
-      thead tr th {{ font-weight: 900 !important; }}
+      section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 {{
+        color: {DARK_BLUE};
+      }}
+
+      thead tr th {{ font-weight: 800 !important; }}
     </style>
     """,
     unsafe_allow_html=True
 )
 
-# ---------------- App title ----------------
+# ---------------- Header ----------------
 st.markdown('<div class="title">Used Oil Collection Pilot — Maharashtra</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="subtitle">Upload → view all workshops → click Select Cluster → box/lasso select → see totals. One single map only.</div>',
+    '<div class="subtitle">Filter workshops by volume, select exact names (tick/untick), and generate a one-way milk-run route from the depot.</div>',
     unsafe_allow_html=True
 )
 
-# ---------------- Session state ----------------
-if "selected_names" not in st.session_state:
-    st.session_state.selected_names = None
-
-if "cluster_mode" not in st.session_state:
-    st.session_state.cluster_mode = False
-
-if "map_selected_codes" not in st.session_state:
-    st.session_state.map_selected_codes = []
-
-# ---------------- Upload ----------------
 uploaded = st.sidebar.file_uploader("Upload MH geocoded Excel", type=["xlsx"])
 if uploaded is None:
     st.info("Upload MH_geocoded.xlsx from the sidebar to start.")
@@ -122,6 +120,76 @@ def load_excel(file) -> pd.DataFrame:
             df[c] = df[c].fillna("").astype(str)
     df = df[df["Latitude"].notna() & df["Longitude"].notna()].copy()
     return df
+
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    R = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def build_distance_matrix(coords):
+    n = len(coords)
+    mat = np.zeros((n, n), dtype=int)
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                mat[i, j] = 0
+            else:
+                km = haversine_km(coords[i][0], coords[i][1], coords[j][0], coords[j][1])
+                mat[i, j] = int(km * 1000)
+    return mat
+
+
+def solve_open_route_from_depot(coords, seconds=2):
+    """
+    One-way milk run:
+    Start at depot (index 0), visit all points, end anywhere.
+    Implement with dummy end node with zero inbound cost.
+    """
+    n = len(coords)
+    dummy_end = n
+    coords2 = coords + [coords[0]]
+    dist = build_distance_matrix(coords2)
+    BIG = 10**9
+
+    for i in range(n + 1):
+        dist[i][dummy_end] = 0
+    for j in range(n + 1):
+        dist[dummy_end][j] = BIG
+    dist[dummy_end][dummy_end] = 0
+
+    manager = pywrapcp.RoutingIndexManager(n + 1, 1, [0], [dummy_end])
+    routing = pywrapcp.RoutingModel(manager)
+
+    def dist_cb(from_index, to_index):
+        f = manager.IndexToNode(from_index)
+        t = manager.IndexToNode(to_index)
+        return int(dist[f][t])
+
+    transit = routing.RegisterTransitCallback(dist_cb)
+    routing.SetArcCostEvaluatorOfAllVehicles(transit)
+
+    params = pywrapcp.DefaultRoutingSearchParameters()
+    params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+    params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    params.time_limit.FromSeconds(int(seconds))
+
+    sol = routing.SolveWithParameters(params)
+    if not sol:
+        return None, None, None
+
+    route_nodes = []
+    idx = routing.Start(0)
+    while not routing.IsEnd(idx):
+        route_nodes.append(manager.IndexToNode(idx))
+        idx = sol.Value(routing.NextVar(idx))
+    route_nodes.append(manager.IndexToNode(idx))  # dummy end
+
+    return route_nodes, sol.ObjectiveValue(), dummy_end
 
 
 def _stable_u01(seed_text: str) -> float:
@@ -211,19 +279,23 @@ st.sidebar.header("Filters")
 annual_min = st.sidebar.number_input("Annual ≥ (MT)", 0.0, value=0.0)
 monthly_min = st.sidebar.number_input("Monthly ≥ (MT)", 0.0, value=0.0)
 weekly_min  = st.sidebar.number_input("Weekly ≥ (MT)", 0.0, value=0.0)
+
 top_n = st.sidebar.number_input("Top N by Annual (0 = all)", 0, value=0, step=5)
 
+# Excel-like tick/untick selection
 st.sidebar.subheader("Search / Select workshops")
-all_names = sorted(sites["Customer_Name"].dropna().astype(str).unique().tolist())
 
-# Init default selection once (all)
-if st.session_state.selected_names is None:
-    st.session_state.selected_names = all_names
+all_names = sorted(sites["Customer_Name"].dropna().astype(str).unique().tolist())
+default_selected = all_names  # default: all selected
+
+# Persistent selection in session_state
+if "selected_names" not in st.session_state:
+    st.session_state.selected_names = default_selected
 
 b1, b2 = st.sidebar.columns(2)
 with b1:
     if st.button("Select all", key="btn_select_all"):
-        st.session_state.selected_names = all_names
+        st.session_state.selected_names = default_selected
 with b2:
     if st.button("Clear all", key="btn_clear_all"):
         st.session_state.selected_names = []
@@ -231,9 +303,9 @@ with b2:
 selected_names = st.sidebar.multiselect(
     "Tick/Untick names",
     options=all_names,
-    default=st.session_state.selected_names
+    default=st.session_state.selected_names,
+    key="selected_names"
 )
-st.session_state.selected_names = selected_names
 
 st.sidebar.header("Map display")
 use_jitter = st.sidebar.checkbox("Jitter overlapping pins", True)
@@ -242,11 +314,14 @@ jitter_m = st.sidebar.slider("Jitter meters", 0, 800, 140) if use_jitter else 0
 # ---------------- Apply filters ----------------
 f = sites.copy()
 
+# Apply name tick/untick filter
 if selected_names:
     f = f[f["Customer_Name"].isin(selected_names)]
 else:
+    # if nothing selected, show empty
     f = f.iloc[0:0]
 
+# Apply volume filters
 f = f[
     (f["Generation_MT"] >= annual_min) &
     (f["Monthly_Generation_MT"] >= monthly_min) &
@@ -259,48 +334,60 @@ if top_n > 0:
 weekly_total = float(f["Weekly_Generation_MT"].sum()) if len(f) else 0.0
 monthly_total = float(f["Monthly_Generation_MT"].sum()) if len(f) else 0.0
 annual_total = float(f["Generation_MT"].sum()) if len(f) else 0.0
+
 kpi_cards(len(f), weekly_total, monthly_total, annual_total)
 
-# For map plotting
+# Plot data (with jitter for visualization)
 f_plot = apply_jitter(f, jitter_m)
 sizes = scale_sizes(f_plot["Weekly_Generation_MT"], min_size=12, max_size=30)
 
-# ---------------- Cluster controls (buttons) ----------------
-btn1, btn2 = st.columns([1, 1])
+plot_lut = dict(zip(
+    f_plot["Customer_Code"].astype(str),
+    zip(f_plot["Lat_plot"].astype(float), f_plot["Lon_plot"].astype(float))
+))
 
-with btn1:
-    if st.button("Select Cluster"):
-        st.session_state.cluster_mode = True
-
-with btn2:
-    if st.button("Clear Selection"):
-        st.session_state.map_selected_codes = []
-        st.session_state.cluster_mode = False
-
-# ---------------- Build ONE map ----------------
+# ---------------- Map ----------------
 fig = go.Figure()
 
-# Workshops trace (must be trace 0 for selection indexing)
 if len(f_plot) > 0:
     fig.add_trace(go.Scattermapbox(
         lat=f_plot["Lat_plot"],
         lon=f_plot["Lon_plot"],
-        mode="markers",
-        marker=dict(size=sizes, color=BLUE, opacity=0.9),
-        customdata=f_plot["Customer_Code"].astype(str),
+        mode="markers+text",
+        marker=dict(size=sizes, color=BLUE, opacity=0.95),
+        text=["📍"] * len(f_plot),
+        textposition="top center",
+        textfont=dict(size=15, color=BLUE),
         hovertext=f_plot["Customer_Name"],
-        hovertemplate="<b>%{hovertext}</b><extra></extra>",
+        customdata=np.stack([
+            f_plot["City"],
+            f_plot["Pin_Code"],
+            f_plot["Generation_MT"],
+            f_plot["Monthly_Generation_MT"],
+            f_plot["Weekly_Generation_MT"]
+        ], axis=1),
+        hovertemplate=(
+            "<b>%{hovertext}</b><br>"
+            "City: %{customdata[0]}<br>"
+            "Pin: %{customdata[1]}<br>"
+            "Annual: %{customdata[2]:.2f} MT<br>"
+            "Monthly: %{customdata[3]:.2f} MT<br>"
+            "Weekly: %{customdata[4]:.2f} MT<br>"
+            "<extra></extra>"
+        ),
         name="Workshops"
     ))
 
-# Depot trace
 fig.add_trace(go.Scattermapbox(
     lat=[float(depot["Latitude"])],
     lon=[float(depot["Longitude"])],
-    mode="markers",
+    mode="markers+text",
     marker=dict(size=30, color=ORANGE, opacity=1),
-    hovertext=["Depot"],
-    hovertemplate="<b>Depot</b><extra></extra>",
+    text=["📌"],
+    textposition="top center",
+    textfont=dict(size=17, color=ORANGE),
+    hovertext=[depot["Customer_Name"]],
+    hovertemplate="<b>Depot: %{hovertext}</b><extra></extra>",
     name="Depot"
 ))
 
@@ -311,11 +398,54 @@ fig.update_layout(
         zoom=6.8
     ),
     margin=dict(l=0, r=0, t=0, b=0),
-    height=620,
-    dragmode="lasso" if st.session_state.cluster_mode else "pan"
+    height=620
 )
 
-# ---------------- Single render container ----------------
+# ---------------- Route optimization ----------------
+c1, c2 = st.columns([1, 3], vertical_alignment="center")
+with c1:
+    run_route = st.button("Optimize route (draw line)")
+
+route_df = None
+route_km = None
+
+if run_route:
+    if len(f) < 1:
+        st.warning("No workshops selected.")
+    elif len(f) == 1:
+        st.info("Only 1 workshop selected. No route line needed.")
+    else:
+        ordered = pd.concat([pd.DataFrame([depot]), f], ignore_index=True).reset_index(drop=True)
+        coords = list(zip(ordered["Latitude"].astype(float), ordered["Longitude"].astype(float)))
+
+        route_nodes, obj_m, dummy_end = solve_open_route_from_depot(coords, seconds=2)
+        if route_nodes is None:
+            st.error("Route solve failed. Try reducing Top N.")
+        else:
+            route_nodes = [n for n in route_nodes if n != dummy_end]
+            route_df = ordered.iloc[route_nodes].reset_index(drop=True)
+            route_km = obj_m / 1000.0
+
+            line_lat, line_lon = [], []
+            for _, r in route_df.iterrows():
+                code = str(r["Customer_Code"])
+                if "DEPOT_ABC" in code:
+                    line_lat.append(float(depot["Latitude"]))
+                    line_lon.append(float(depot["Longitude"]))
+                else:
+                    latlon = plot_lut.get(code, (float(r["Latitude"]), float(r["Longitude"])))
+                    line_lat.append(latlon[0])
+                    line_lon.append(latlon[1])
+
+            fig.add_trace(go.Scattermapbox(
+                lat=line_lat,
+                lon=line_lon,
+                mode="lines",
+                line=dict(width=5, color=DARK_BLUE),
+                name="Optimized route"
+            ))
+
+# framed map container
 st.markdown(
     """
     <div style="
@@ -328,65 +458,22 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-
-if st.session_state.cluster_mode:
-    st.info("Cluster mode ON — use toolbar (top-right) → Box Select or Lasso Select, then drag on the map.")
-
-    selected = plotly_events(
-        fig,
-        select_event=True,
-        click_event=False,
-        hover_event=False,
-        override_height=620
-    )
-
-    # Persist selection
-    if selected:
-        idxs = []
-        for p in selected:
-            if p.get("curveNumber", 0) == 0 and "pointIndex" in p:
-                idxs.append(int(p["pointIndex"]))
-        idxs = sorted(set(idxs))
-        if idxs:
-            st.session_state.map_selected_codes = f_plot.iloc[idxs]["Customer_Code"].astype(str).tolist()
-
-# Always show the same single map exactly once
 st.plotly_chart(fig, use_container_width=True)
-
 st.markdown("</div>", unsafe_allow_html=True)
 
-# ---------------- Selected cluster summary ----------------
-st.subheader("Cluster Summary")
-
-selected_codes = st.session_state.map_selected_codes
-selected_df = f[f["Customer_Code"].astype(str).isin(selected_codes)].copy() if selected_codes else f.iloc[0:0].copy()
-
-if len(selected_df) == 0:
-    st.caption("No cluster selected. Click Select Cluster and draw a box/lasso on the map.")
-else:
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Workshops", len(selected_df))
-    c2.metric("Weekly MT", round(float(selected_df["Weekly_Generation_MT"].sum()), 2))
-    c3.metric("Monthly MT", round(float(selected_df["Monthly_Generation_MT"].sum()), 2))
-    c4.metric("Annual MT", round(float(selected_df["Generation_MT"].sum()), 2))
-
+if route_km is not None:
+    st.success(f"One-way distance (approx): {route_km:.1f} km")
+    st.subheader("Route order")
     st.dataframe(
-        selected_df[[
-            "Customer_Name",
-            "City",
-            "Pin_Code",
-            "Weekly_Generation_MT",
-            "Monthly_Generation_MT",
-            "Generation_MT"
-        ]].sort_values("Generation_MT", ascending=False).reset_index(drop=True),
+        route_df[["Customer_Name", "City", "Pin_Code",
+                  "Weekly_Generation_MT", "Monthly_Generation_MT", "Generation_MT"]]
+        .reset_index(drop=True),
         use_container_width=True,
-        height=360
+        height=320
     )
 
-# ---------------- Full filtered list + download ----------------
-st.divider()
+# ---------------- Table + Download ----------------
 st.subheader("Filtered list")
-
 show_cols = [
     "Customer_Code", "Customer_Name", "City", "Pin_Code",
     "Generation_MT", "Monthly_Generation_MT", "Weekly_Generation_MT", "Geocode_Status"
