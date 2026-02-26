@@ -72,7 +72,7 @@ st.markdown(
 
 st.markdown('<div class="title">Used Oil Collection Pilot — Maharashtra</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="subtitle">Filter workshops by volume, select exact names (tick/untick), and use box/lasso on the map to create a “cluster selection”.</div>',
+    '<div class="subtitle">One map only: select pins using box/lasso, and draw optimized route on the same map.</div>',
     unsafe_allow_html=True
 )
 
@@ -230,7 +230,13 @@ def kpi_cards(workshops_count, weekly_mt, monthly_mt, annual_mt):
     )
 
 
-# ---------------- Load and split depot ----------------
+# ---------------- State init ----------------
+if "map_selected_codes" not in st.session_state:
+    st.session_state.map_selected_codes = []
+if "route_line" not in st.session_state:
+    st.session_state.route_line = None  # {"lat": [...], "lon": [...], "km": float, "scope": str}
+
+# ---------------- Load data ----------------
 df = load_excel(uploaded)
 
 depot_mask = df["Customer_Code"].astype(str).str.contains("DEPOT_ABC", na=False)
@@ -276,12 +282,9 @@ jitter_m = st.sidebar.slider("Jitter meters", 0, 800, 140) if use_jitter else 0
 
 st.sidebar.subheader("Map cluster selection")
 enable_select = st.sidebar.checkbox("Enable cluster select (box/lasso)", value=False)
-
-if "map_selected_codes" not in st.session_state:
-    st.session_state.map_selected_codes = []
-
 if st.sidebar.button("Clear map selection"):
     st.session_state.map_selected_codes = []
+    st.session_state.route_line = None
 
 # ---------------- Apply filters ----------------
 f = sites.copy()
@@ -313,10 +316,72 @@ plot_lut = dict(zip(
     zip(f_plot["Lat_plot"].astype(float), f_plot["Lon_plot"].astype(float))
 ))
 
-# ---------------- Build map figure ----------------
+# ---------------- Route controls (input) ----------------
+st.subheader("Route optimization")
+
+selected_codes = st.session_state.map_selected_codes
+selected_df = f[f["Customer_Code"].astype(str).isin(selected_codes)].copy() if selected_codes else f.iloc[0:0].copy()
+
+route_scope = st.radio(
+    "Optimize route for",
+    options=["Filtered set", "Selected cluster"],
+    horizontal=True,
+    index=1 if len(selected_df) > 0 else 0
+)
+
+btn_row1, btn_row2 = st.columns([1, 1])
+with btn_row1:
+    run_route = st.button("Optimize route (draw line)")
+with btn_row2:
+    clear_route = st.button("Clear route line")
+if clear_route:
+    st.session_state.route_line = None
+
+# If optimize clicked, compute route + save line in session_state
+if run_route:
+    base = selected_df.copy() if route_scope == "Selected cluster" else f.copy()
+
+    if len(base) < 1:
+        st.warning("No workshops available in this scope.")
+        st.session_state.route_line = None
+    elif len(base) == 1:
+        st.info("Only 1 workshop in this scope. No route line needed.")
+        st.session_state.route_line = None
+    else:
+        ordered = pd.concat([pd.DataFrame([depot]), base], ignore_index=True).reset_index(drop=True)
+        coords = list(zip(ordered["Latitude"].astype(float), ordered["Longitude"].astype(float)))
+
+        route_nodes, obj_m, dummy_end = solve_open_route_from_depot(coords, seconds=2)
+        if route_nodes is None:
+            st.error("Route solve failed. Try reducing Top N / selection size.")
+            st.session_state.route_line = None
+        else:
+            route_nodes = [n for n in route_nodes if n != dummy_end]
+            route_df = ordered.iloc[route_nodes].reset_index(drop=True)
+            route_km = obj_m / 1000.0
+
+            line_lat, line_lon = [], []
+            for _, r in route_df.iterrows():
+                code = str(r["Customer_Code"])
+                if "DEPOT_ABC" in code:
+                    line_lat.append(float(depot["Latitude"]))
+                    line_lon.append(float(depot["Longitude"]))
+                else:
+                    latlon = plot_lut.get(code, (float(r["Latitude"]), float(r["Longitude"])))
+                    line_lat.append(latlon[0])
+                    line_lon.append(latlon[1])
+
+            st.session_state.route_line = {
+                "lat": line_lat,
+                "lon": line_lon,
+                "km": float(route_km),
+                "scope": route_scope
+            }
+
+# ---------------- Build SINGLE map figure (pins + depot + optional route line) ----------------
 fig = go.Figure()
 
-# Workshops trace FIRST (important for selection)
+# workshops trace first (needed for selection indices)
 if len(f_plot) > 0:
     fig.add_trace(go.Scattermapbox(
         lat=f_plot["Lat_plot"],
@@ -347,7 +412,7 @@ if len(f_plot) > 0:
         name="Workshops"
     ))
 
-# Depot trace
+# depot
 fig.add_trace(go.Scattermapbox(
     lat=[float(depot["Latitude"])],
     lon=[float(depot["Longitude"])],
@@ -361,6 +426,17 @@ fig.add_trace(go.Scattermapbox(
     name="Depot"
 ))
 
+# optional route line (output) – still on the SAME map
+if st.session_state.route_line is not None:
+    rl = st.session_state.route_line
+    fig.add_trace(go.Scattermapbox(
+        lat=rl["lat"],
+        lon=rl["lon"],
+        mode="lines",
+        line=dict(width=5, color=DARK_BLUE),
+        name=f"Optimized route ({rl['scope']})"
+    ))
+
 fig.update_layout(
     mapbox=dict(
         style="open-street-map",
@@ -372,7 +448,7 @@ fig.update_layout(
     dragmode="lasso" if enable_select else "pan"
 )
 
-# ---------------- Render map + capture selection ----------------
+# ---------------- Render SINGLE map + capture selection (still one render only) ----------------
 st.markdown(
     """
     <div style="
@@ -396,7 +472,7 @@ if enable_select:
         override_height=620
     )
 
-    # Convert selected points to Customer_Code list
+    # update selected set
     if selected:
         idxs = []
         for p in selected:
@@ -406,18 +482,22 @@ if enable_select:
         if idxs:
             codes = f_plot.iloc[idxs]["Customer_Code"].astype(str).tolist()
             st.session_state.map_selected_codes = sorted(set(codes))
-
-    st.plotly_chart(fig, use_container_width=True)
 else:
-    st.plotly_chart(fig, use_container_width=True)
+    # still call plotly_events? no — keep it a plain chart, avoids duplicate renders.
+    selected = None
 
+# One single visible chart
+st.plotly_chart(fig, use_container_width=True)
 st.markdown("</div>", unsafe_allow_html=True)
 
-# ---------------- Selected cluster details ----------------
+# ---------------- Output panels (no extra maps) ----------------
+if st.session_state.route_line is not None:
+    st.success(f"One-way distance (approx): {st.session_state.route_line['km']:.1f} km  |  Scope: {st.session_state.route_line['scope']}")
+
+st.subheader("Selected cluster (from map)")
 selected_codes = st.session_state.map_selected_codes
 selected_df = f[f["Customer_Code"].astype(str).isin(selected_codes)].copy() if selected_codes else f.iloc[0:0].copy()
 
-st.subheader("Selected cluster (from map)")
 if len(selected_df) == 0:
     st.caption("No map selection yet. Turn on cluster select and box/lasso some pins.")
 else:
@@ -436,72 +516,6 @@ else:
         height=350
     )
 
-# ---------------- Route optimization ----------------
-st.divider()
-st.subheader("Route optimization (one-way milk run from depot)")
-
-route_scope = st.radio(
-    "Optimize route for",
-    options=["Filtered set", "Selected cluster"],
-    horizontal=True,
-    index=1 if len(selected_df) > 0 else 0
-)
-run_route = st.button("Optimize route (draw line)")
-
-if run_route:
-    base = selected_df.copy() if route_scope == "Selected cluster" else f.copy()
-
-    if len(base) < 1:
-        st.warning("No workshops available in this scope.")
-    elif len(base) == 1:
-        st.info("Only 1 workshop in this scope. No route line needed.")
-    else:
-        ordered = pd.concat([pd.DataFrame([depot]), base], ignore_index=True).reset_index(drop=True)
-        coords = list(zip(ordered["Latitude"].astype(float), ordered["Longitude"].astype(float)))
-
-        route_nodes, obj_m, dummy_end = solve_open_route_from_depot(coords, seconds=2)
-        if route_nodes is None:
-            st.error("Route solve failed. Try reducing Top N / selection size.")
-        else:
-            route_nodes = [n for n in route_nodes if n != dummy_end]
-            route_df = ordered.iloc[route_nodes].reset_index(drop=True)
-            route_km = obj_m / 1000.0
-
-            # Copy base map and add route line
-            fig_route = go.Figure(fig)
-
-            line_lat, line_lon = [], []
-            for _, r in route_df.iterrows():
-                code = str(r["Customer_Code"])
-                if "DEPOT_ABC" in code:
-                    line_lat.append(float(depot["Latitude"]))
-                    line_lon.append(float(depot["Longitude"]))
-                else:
-                    latlon = plot_lut.get(code, (float(r["Latitude"]), float(r["Longitude"])))
-                    line_lat.append(latlon[0])
-                    line_lon.append(latlon[1])
-
-            fig_route.add_trace(go.Scattermapbox(
-                lat=line_lat,
-                lon=line_lon,
-                mode="lines",
-                line=dict(width=5, color=DARK_BLUE),
-                name="Optimized route"
-            ))
-
-            st.success(f"One-way distance (approx): {route_km:.1f} km")
-            st.plotly_chart(fig_route, use_container_width=True)
-
-            st.subheader("Route order")
-            st.dataframe(
-                route_df[["Customer_Name", "City", "Pin_Code",
-                          "Weekly_Generation_MT", "Monthly_Generation_MT", "Generation_MT"]]
-                .reset_index(drop=True),
-                use_container_width=True,
-                height=320
-            )
-
-# ---------------- Full filtered list + download ----------------
 st.divider()
 st.subheader("Filtered list")
 
