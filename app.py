@@ -151,7 +151,7 @@ def solve_round_trip_from_depot(coords, seconds=2):
     n = len(coords)
     dist = build_distance_matrix(coords)
 
-    manager = pywrapcp.RoutingIndexManager(n, 1, 0)  # start/end at depot
+    manager = pywrapcp.RoutingIndexManager(n, 1, 0)
     routing = pywrapcp.RoutingModel(manager)
 
     def dist_cb(from_index, to_index):
@@ -176,7 +176,7 @@ def solve_round_trip_from_depot(coords, seconds=2):
     while not routing.IsEnd(idx):
         route_nodes.append(manager.IndexToNode(idx))
         idx = sol.Value(routing.NextVar(idx))
-    route_nodes.append(manager.IndexToNode(idx))  # depot again
+    route_nodes.append(manager.IndexToNode(idx))
     return route_nodes, sol.ObjectiveValue()
 
 
@@ -276,61 +276,29 @@ if abc_mask.any():
     if "Customer_Name" in r and str(r["Customer_Name"]).strip():
         abc_name = str(r["Customer_Name"]).strip()
 
-# Fallback if not present in file
 if abc_lat is None or abc_lon is None:
-    abc_lat, abc_lon = 19.7260, 72.7487  # fallback approx
+    abc_lat, abc_lon = 19.7260, 72.7487
 
-# Two recycler depots (hardcoded)
 recyclers = {
     "ABC Petrochem (Palghar)": {"name": abc_name, "lat": abc_lat, "lon": abc_lon},
     "RANJANA GROUP OF INDUSTRIES (Nagpur)": {"name": "RANJANA GROUP OF INDUSTRIES", "lat": 20.9316, "lon": 78.9659},
 }
 
-# Workshops are everything except DEPOT_ABC row (if it exists)
 sites = df[~abc_mask].copy() if abc_mask.any() else df.copy()
 
-# Names list and default selection
 all_names = sorted(sites["Customer_Name"].dropna().astype(str).unique().tolist())
 default_selected_names = all_names
-
-# Initialize default selection (once)
 if st.session_state.selected_names is None:
     st.session_state.selected_names = default_selected_names
 
-# ---------------- RESET BUTTON (top-right) ----------------
-top_reset_col1, top_reset_col2 = st.columns([5, 1], vertical_alignment="center")
-with top_reset_col2:
-    st.markdown('<div class="secondary-btn">', unsafe_allow_html=True)
-    do_reset = st.button("Reset all", key="btn_reset_all")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-if do_reset:
-    # Reset sidebar widgets (must match keys)
-    st.session_state["annual_min"] = 0.0
-    st.session_state["monthly_min"] = 0.0
-    st.session_state["weekly_min"] = 0.0
-    st.session_state["top_n"] = 0
-    st.session_state["selected_names"] = default_selected_names
-    st.session_state["use_jitter"] = True
-    st.session_state["jitter_m"] = 140
-    st.session_state["recycler_choice"] = list(recyclers.keys())[0]
-
-    # Reset cluster selection state
-    st.session_state.cluster_selected_codes = None
-    st.session_state.cluster_mode = False
-
-    st.rerun()
-
 # ---------------- Sidebar filters ----------------
 st.sidebar.header("Filters")
-
 annual_min = st.sidebar.number_input("Annual ≥ (MT)", 0.0, value=0.0, key="annual_min")
 monthly_min = st.sidebar.number_input("Monthly ≥ (MT)", 0.0, value=0.0, key="monthly_min")
 weekly_min  = st.sidebar.number_input("Weekly ≥ (MT)", 0.0, value=0.0, key="weekly_min")
 top_n = st.sidebar.number_input("Top N by Annual (0 = all)", 0, value=0, step=5, key="top_n")
 
 st.sidebar.subheader("Search / Select workshops")
-
 b1, b2 = st.sidebar.columns(2)
 with b1:
     if st.button("Select all", key="btn_select_all"):
@@ -352,7 +320,6 @@ jitter_m = st.sidebar.slider("Jitter meters", 0, 800, 140, key="jitter_m") if us
 
 # ---------------- Apply filters ----------------
 f = sites.copy()
-
 if selected_names:
     f = f[f["Customer_Name"].isin(selected_names)]
 else:
@@ -363,7 +330,6 @@ f = f[
     (f["Monthly_Generation_MT"] >= monthly_min) &
     (f["Weekly_Generation_MT"] >= weekly_min)
 ]
-
 if top_n > 0:
     f = f.sort_values("Generation_MT", ascending=False).head(int(top_n))
 
@@ -376,38 +342,10 @@ annual_total = float(f["Generation_MT"].sum()) if len(f) else 0.0
 suffix = " (selected cluster)" if st.session_state.cluster_selected_codes is not None else " (filtered)"
 kpi_cards(len(f), weekly_total, monthly_total, annual_total, title_suffix=suffix)
 
-# ---------------- Cluster buttons ----------------
-t1, t2, t3 = st.columns([1.2, 1.2, 3.6], vertical_alignment="center")
-
-with t1:
-    if st.button("Select Cluster", key="btn_cluster_mode"):
-        st.session_state.cluster_mode = True
-
-with t2:
-    st.markdown('<div class="secondary-btn">', unsafe_allow_html=True)
-    clear = st.button("Clear Selection", key="btn_clear_cluster")
-    st.markdown("</div>", unsafe_allow_html=True)
-    if clear:
-        st.session_state.cluster_selected_codes = None
-        st.session_state.cluster_mode = False
-
-with t3:
-    if st.session_state.cluster_mode:
-        st.info("Cluster mode ON: use Box Select or Lasso Select on the map (top-right tools) to select an area.")
-    else:
-        st.caption("Tip: Click 'Select Cluster' to draw a box/lasso on the same map and filter to that region.")
-
-# Map dataset for selection mode (show all while selecting)
+# ---------------- Map dataset for selection mode ----------------
 map_base = sites.copy() if st.session_state.cluster_mode else f.copy()
 map_plot = apply_jitter(map_base, jitter_m)
 map_sizes = scale_sizes(map_plot["Weekly_Generation_MT"], min_size=12, max_size=30)
-
-# Recycler selector (for route)
-selected_recycler_label = st.selectbox(
-    "Select Recycler for Route Optimization",
-    list(recyclers.keys()),
-    key="recycler_choice"
-)
 
 def build_base_map_figure():
     fig0 = go.Figure()
@@ -457,18 +395,14 @@ def build_base_map_figure():
         ))
 
     fig0.update_layout(
-        mapbox=dict(
-            style="open-street-map",
-            center=dict(lat=20.5, lon=76.5),
-            zoom=6.2
-        ),
+        mapbox=dict(style="open-street-map", center=dict(lat=20.5, lon=76.5), zoom=6.2),
         dragmode=("lasso" if st.session_state.cluster_mode else "pan"),
         margin=dict(l=0, r=0, t=0, b=0),
         height=620
     )
     return fig0
 
-
+# ---------------- MAP RENDER (controls will be below) ----------------
 fig = build_base_map_figure()
 
 st.markdown(
@@ -478,7 +412,7 @@ st.markdown(
         border-radius:14px;
         padding:6px;
         box-shadow:0 6px 18px rgba(10,35,101,0.06);
-        margin-bottom:8px;
+        margin-bottom:10px;
     ">
     """,
     unsafe_allow_html=True
@@ -511,13 +445,60 @@ if st.session_state.cluster_mode and selection is not None:
     except Exception:
         pass
 
+# ---------------- CONTROLS BELOW MAP (as requested) ----------------
+ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([1.1, 1.1, 2.2, 1.6], vertical_alignment="center")
+
+with ctrl1:
+    if st.button("Select Cluster", key="btn_cluster_mode_below"):
+        st.session_state.cluster_mode = True
+        st.rerun()
+
+with ctrl2:
+    st.markdown('<div class="secondary-btn">', unsafe_allow_html=True)
+    if st.button("Clear Selection", key="btn_clear_cluster_below"):
+        st.session_state.cluster_selected_codes = None
+        st.session_state.cluster_mode = False
+        st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+with ctrl3:
+    selected_recycler_label = st.selectbox(
+        "Select Recycler for Route Optimization",
+        list(recyclers.keys()),
+        key="recycler_choice"
+    )
+
+with ctrl4:
+    st.markdown('<div class="secondary-btn">', unsafe_allow_html=True)
+    if st.button("Reset all", key="btn_reset_all_below"):
+        st.session_state["annual_min"] = 0.0
+        st.session_state["monthly_min"] = 0.0
+        st.session_state["weekly_min"] = 0.0
+        st.session_state["top_n"] = 0
+        st.session_state["selected_names"] = default_selected_names
+        st.session_state["use_jitter"] = True
+        st.session_state["jitter_m"] = 140
+        st.session_state["recycler_choice"] = list(recyclers.keys())[0]
+        st.session_state.cluster_selected_codes = None
+        st.session_state.cluster_mode = False
+        st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# Guidance text below controls
+if st.session_state.cluster_mode:
+    st.info("Cluster mode ON: use Box Select or Lasso Select on the map (top-right tools) to select an area.")
+elif st.session_state.cluster_selected_codes is not None:
+    st.caption("Cluster filter is active. Use 'Clear Selection' or 'Reset all' to go back to normal.")
+else:
+    st.caption("Tip: Click 'Select Cluster' to draw a box/lasso on the same map and filter to that region.")
+
 # ---------------- Route optimization (ROUND TRIP) ----------------
 c1, c2 = st.columns([1, 3], vertical_alignment="center")
 with c1:
     run_route = st.button("Optimize route (round trip)")
 
-route_df = None
 route_km = None
+route_df = None
 
 # LUT for route drawing (use filtered workshops jittered)
 f_plot = apply_jitter(f.copy(), jitter_m)
@@ -575,7 +556,7 @@ if run_route:
                 name="Optimized round-trip route"
             ))
 
-            # Direction markers (triangle + backup arrow)
+            # Direction markers
             mid_lat, mid_lon = [], []
             for i in range(len(line_lat) - 1):
                 mlat, mlon = midpoint(line_lat[i], line_lon[i], line_lat[i+1], line_lon[i+1])
