@@ -19,20 +19,26 @@ st.markdown(
     <style>
       .stApp {{ background: #ffffff; }}
 
-      /* Larger base font */
-      html, body, [class*="css"] {{ font-size: 17px !important; }}
+      /* Bigger text everywhere */
+      html, body, [class*="css"] {{ font-size: 18.5px !important; }}
 
+      /* Title */
       .title {{
-        font-size: 34px;
-        font-weight: 800;
+        font-size: 36px;
+        font-weight: 900;
         color: {DARK_BLUE};
-        margin-bottom: 0.2rem;
+        margin-bottom: 0.25rem;
       }}
       .subtitle {{
-        font-size: 16px;
+        font-size: 17px;
         color: #334155;
         margin-top: 0;
         margin-bottom: 1rem;
+      }}
+
+      /* Sidebar widget labels */
+      section[data-testid="stSidebar"] label, section[data-testid="stSidebar"] p {{
+        font-size: 16.5px !important;
       }}
 
       /* KPI cards */
@@ -44,7 +50,7 @@ st.markdown(
       }}
       .kpi {{
         border: 1px solid rgba(10,35,101,0.12);
-        border-left: 6px solid {BLUE};
+        border-left: 7px solid {BLUE};
         border-radius: 14px;
         padding: 14px 14px;
         background: #ffffff;
@@ -53,15 +59,15 @@ st.markdown(
       .kpi.orange {{ border-left-color: {ORANGE}; }}
       .kpi.dark {{ border-left-color: {DARK_BLUE}; }}
       .kpi .label {{
-        font-size: 14px;
+        font-size: 15px;
         color: #475569;
         margin-bottom: 6px;
-        font-weight: 600;
+        font-weight: 700;
       }}
       .kpi .value {{
-        font-size: 26px;
+        font-size: 28px;
         color: #0f172a;
-        font-weight: 800;
+        font-weight: 900;
         line-height: 1.1;
       }}
 
@@ -70,23 +76,21 @@ st.markdown(
         background: {ORANGE};
         color: white;
         border: none;
-        padding: 0.65rem 1.0rem;
+        padding: 0.70rem 1.05rem;
         border-radius: 10px;
-        font-weight: 800;
-        font-size: 16px;
+        font-weight: 900;
+        font-size: 16.5px;
       }}
       .stButton > button:hover {{
         background: #d9551e;
         color: white;
       }}
 
-      /* Sidebar headings */
       section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 {{
         color: {DARK_BLUE};
       }}
 
-      /* Dataframe header */
-      thead tr th {{ font-weight: 700 !important; }}
+      thead tr th {{ font-weight: 800 !important; }}
     </style>
     """,
     unsafe_allow_html=True
@@ -95,7 +99,7 @@ st.markdown(
 # ---------------- Header ----------------
 st.markdown('<div class="title">Used Oil Collection Pilot — Maharashtra</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="subtitle">Filter workshops by volume, visualize on map, and generate a one-way milk-run route from the depot.</div>',
+    '<div class="subtitle">Filter workshops by volume, select exact names (tick/untick), and generate a one-way milk-run route from the depot.</div>',
     unsafe_allow_html=True
 )
 
@@ -258,7 +262,7 @@ def kpi_cards(workshops_count, weekly_mt, monthly_mt, annual_mt):
     )
 
 
-# ---------------- Load and filter ----------------
+# ---------------- Load and split depot ----------------
 df = load_excel(uploaded)
 
 depot_mask = df["Customer_Code"].astype(str).str.contains("DEPOT_ABC", na=False)
@@ -269,24 +273,55 @@ if not depot_mask.any():
 depot = df[depot_mask].iloc[0]
 sites = df[~depot_mask].copy()
 
+# ---------------- Sidebar filters ----------------
 st.sidebar.header("Filters")
-name_q = st.sidebar.text_input("Search by name", "")
 
 annual_min = st.sidebar.number_input("Annual ≥ (MT)", 0.0, value=0.0)
 monthly_min = st.sidebar.number_input("Monthly ≥ (MT)", 0.0, value=0.0)
-weekly_min = st.sidebar.number_input("Weekly ≥ (MT)", 0.0, value=0.0)
+weekly_min  = st.sidebar.number_input("Weekly ≥ (MT)", 0.0, value=0.0)
 
 top_n = st.sidebar.number_input("Top N by Annual (0 = all)", 0, value=0, step=5)
+
+# Excel-like tick/untick selection
+st.sidebar.subheader("Search / Select workshops")
+
+all_names = sorted(sites["Customer_Name"].dropna().astype(str).unique().tolist())
+default_selected = all_names  # default: all selected
+
+# Persistent selection in session_state
+if "selected_names" not in st.session_state:
+    st.session_state.selected_names = default_selected
+
+b1, b2 = st.sidebar.columns(2)
+with b1:
+    if st.button("Select all", key="btn_select_all"):
+        st.session_state.selected_names = default_selected
+with b2:
+    if st.button("Clear all", key="btn_clear_all"):
+        st.session_state.selected_names = []
+
+selected_names = st.sidebar.multiselect(
+    "Tick/Untick names",
+    options=all_names,
+    default=st.session_state.selected_names,
+    key="selected_names"
+)
 
 st.sidebar.header("Map display")
 use_jitter = st.sidebar.checkbox("Jitter overlapping pins", True)
 jitter_m = st.sidebar.slider("Jitter meters", 0, 800, 140) if use_jitter else 0
 
-# Apply filters
+# ---------------- Apply filters ----------------
 f = sites.copy()
-if name_q:
-    f = f[f["Customer_Name"].str.lower().str.contains(name_q.lower())]
 
+# Apply name tick/untick filter
+if selected_names:
+    f = f[f["Customer_Name"].isin(selected_names)]
+else:
+    # if nothing selected, show empty
+    f = f.iloc[0:0]
+
+# Apply volume filters
 f = f[
     (f["Generation_MT"] >= annual_min) &
     (f["Monthly_Generation_MT"] >= monthly_min) &
@@ -296,9 +331,9 @@ f = f[
 if top_n > 0:
     f = f.sort_values("Generation_MT", ascending=False).head(int(top_n))
 
-weekly_total = float(f["Weekly_Generation_MT"].sum())
-monthly_total = float(f["Monthly_Generation_MT"].sum())
-annual_total = float(f["Generation_MT"].sum())
+weekly_total = float(f["Weekly_Generation_MT"].sum()) if len(f) else 0.0
+monthly_total = float(f["Monthly_Generation_MT"].sum()) if len(f) else 0.0
+annual_total = float(f["Generation_MT"].sum()) if len(f) else 0.0
 
 kpi_cards(len(f), weekly_total, monthly_total, annual_total)
 
@@ -306,16 +341,14 @@ kpi_cards(len(f), weekly_total, monthly_total, annual_total)
 f_plot = apply_jitter(f, jitter_m)
 sizes = scale_sizes(f_plot["Weekly_Generation_MT"], min_size=12, max_size=30)
 
-# Lookup for jittered plotting coordinates (for route line)
 plot_lut = dict(zip(
     f_plot["Customer_Code"].astype(str),
     zip(f_plot["Lat_plot"].astype(float), f_plot["Lon_plot"].astype(float))
 ))
 
-# ---------------- Build base map ----------------
+# ---------------- Map ----------------
 fig = go.Figure()
 
-# Workshops pins
 if len(f_plot) > 0:
     fig.add_trace(go.Scattermapbox(
         lat=f_plot["Lat_plot"],
@@ -345,7 +378,6 @@ if len(f_plot) > 0:
         name="Workshops"
     ))
 
-# Depot pin
 fig.add_trace(go.Scattermapbox(
     lat=[float(depot["Latitude"])],
     lon=[float(depot["Longitude"])],
@@ -366,10 +398,10 @@ fig.update_layout(
         zoom=6.8
     ),
     margin=dict(l=0, r=0, t=0, b=0),
-    height=500  # ✅ smaller map height
+    height=620
 )
 
-# ---------------- Route optimization + draw line ----------------
+# ---------------- Route optimization ----------------
 c1, c2 = st.columns([1, 3], vertical_alignment="center")
 with c1:
     run_route = st.button("Optimize route (draw line)")
@@ -379,7 +411,7 @@ route_km = None
 
 if run_route:
     if len(f) < 1:
-        st.warning("No workshops selected by filters.")
+        st.warning("No workshops selected.")
     elif len(f) == 1:
         st.info("Only 1 workshop selected. No route line needed.")
     else:
@@ -387,7 +419,6 @@ if run_route:
         coords = list(zip(ordered["Latitude"].astype(float), ordered["Longitude"].astype(float)))
 
         route_nodes, obj_m, dummy_end = solve_open_route_from_depot(coords, seconds=2)
-
         if route_nodes is None:
             st.error("Route solve failed. Try reducing Top N.")
         else:
@@ -414,7 +445,7 @@ if run_route:
                 name="Optimized route"
             ))
 
-# ✅ framed map container (presentation look)
+# framed map container
 st.markdown(
     """
     <div style="
@@ -427,14 +458,11 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-
 st.plotly_chart(fig, use_container_width=True)
-
 st.markdown("</div>", unsafe_allow_html=True)
 
 if route_km is not None:
     st.success(f"One-way distance (approx): {route_km:.1f} km")
-
     st.subheader("Route order")
     st.dataframe(
         route_df[["Customer_Name", "City", "Pin_Code",
@@ -446,7 +474,6 @@ if route_km is not None:
 
 # ---------------- Table + Download ----------------
 st.subheader("Filtered list")
-
 show_cols = [
     "Customer_Code", "Customer_Name", "City", "Pin_Code",
     "Generation_MT", "Monthly_Generation_MT", "Weekly_Generation_MT", "Geocode_Status"
