@@ -291,6 +291,22 @@ default_selected_names = all_names
 if st.session_state.selected_names is None:
     st.session_state.selected_names = default_selected_names
 
+# ---------------- Reset callback (FIX) ----------------
+def reset_all():
+    # widget keys (safe here because this runs as callback)
+    st.session_state.annual_min = 0.0
+    st.session_state.monthly_min = 0.0
+    st.session_state.weekly_min = 0.0
+    st.session_state.top_n = 0
+    st.session_state.selected_names = default_selected_names
+    st.session_state.use_jitter = True
+    st.session_state.jitter_m = 140
+    st.session_state.recycler_choice = list(recyclers.keys())[0]
+
+    # non-widget state
+    st.session_state.cluster_selected_codes = None
+    st.session_state.cluster_mode = False
+
 # ---------------- Sidebar filters ----------------
 st.sidebar.header("Filters")
 annual_min = st.sidebar.number_input("Annual ≥ (MT)", 0.0, value=0.0, key="annual_min")
@@ -470,18 +486,7 @@ with ctrl3:
 
 with ctrl4:
     st.markdown('<div class="secondary-btn">', unsafe_allow_html=True)
-    if st.button("Reset all", key="btn_reset_all_below"):
-        st.session_state["annual_min"] = 0.0
-        st.session_state["monthly_min"] = 0.0
-        st.session_state["weekly_min"] = 0.0
-        st.session_state["top_n"] = 0
-        st.session_state["selected_names"] = default_selected_names
-        st.session_state["use_jitter"] = True
-        st.session_state["jitter_m"] = 140
-        st.session_state["recycler_choice"] = list(recyclers.keys())[0]
-        st.session_state.cluster_selected_codes = None
-        st.session_state.cluster_mode = False
-        st.rerun()
+    st.button("Reset all", key="btn_reset_all_below", on_click=reset_all)
     st.markdown("</div>", unsafe_allow_html=True)
 
 # Guidance text below controls
