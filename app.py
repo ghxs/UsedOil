@@ -18,6 +18,8 @@ st.markdown(
     f"""
     <style>
       .stApp {{ background: #ffffff; }}
+
+      /* Bigger text everywhere */
       html, body, [class*="css"] {{ font-size: 18.5px !important; }}
 
       .title {{
@@ -37,6 +39,7 @@ st.markdown(
         font-size: 16.5px !important;
       }}
 
+      /* KPI cards */
       .kpi-wrap {{
         display: grid;
         grid-template-columns: repeat(4, 1fr);
@@ -66,6 +69,7 @@ st.markdown(
         line-height: 1.1;
       }}
 
+      /* Buttons */
       .stButton > button {{
         background: {ORANGE};
         color: white;
@@ -80,6 +84,7 @@ st.markdown(
         color: white;
       }}
 
+      /* Secondary button style */
       .secondary-btn > button {{
         background: white !important;
         color: {DARK_BLUE} !important;
@@ -92,15 +97,17 @@ st.markdown(
       section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 {{
         color: {DARK_BLUE};
       }}
+
       thead tr th {{ font-weight: 800 !important; }}
     </style>
     """,
     unsafe_allow_html=True
 )
 
+# ---------------- Header ----------------
 st.markdown('<div class="title">Used Oil Collection Pilot — Maharashtra</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="subtitle">Filter workshops by volume/name, select a circular cluster on the map, and generate a one-way milk-run route from the depot.</div>',
+    '<div class="subtitle">Filter workshops by volume/name, select a cluster on the map, and generate a one-way milk-run route from the depot.</div>',
     unsafe_allow_html=True
 )
 
@@ -183,7 +190,8 @@ def solve_open_route_from_depot(coords, seconds=2):
     while not routing.IsEnd(idx):
         route_nodes.append(manager.IndexToNode(idx))
         idx = sol.Value(routing.NextVar(idx))
-    route_nodes.append(manager.IndexToNode(idx))
+    route_nodes.append(manager.IndexToNode(idx))  # dummy end
+
     return route_nodes, sol.ObjectiveValue(), dummy_end
 
 
@@ -257,37 +265,13 @@ def kpi_cards(workshops_count, weekly_mt, monthly_mt, annual_mt, title_suffix=""
     )
 
 
-def circle_latlon(center_lat, center_lon, radius_km, n=120):
-    """Approx circle on Earth surface for plotting."""
-    R = 6371.0
-    lat1 = math.radians(center_lat)
-    lon1 = math.radians(center_lon)
-    d = radius_km / R
+# ---------------- Session state for cluster selection ----------------
+if "cluster_mode" not in st.session_state:
+    st.session_state.cluster_mode = False
+if "cluster_selected_codes" not in st.session_state:
+    st.session_state.cluster_selected_codes = None  # None means no cluster filter applied
 
-    lats, lons = [], []
-    for i in range(n + 1):
-        brng = 2 * math.pi * (i / n)
-        lat2 = math.asin(math.sin(lat1) * math.cos(d) + math.cos(lat1) * math.sin(d) * math.cos(brng))
-        lon2 = lon1 + math.atan2(
-            math.sin(brng) * math.sin(d) * math.cos(lat1),
-            math.cos(d) - math.sin(lat1) * math.sin(lat2)
-        )
-        lats.append(math.degrees(lat2))
-        lons.append(math.degrees(lon2))
-    return lats, lons
-
-
-# ---------------- Session state ----------------
-if "circle_mode" not in st.session_state:
-    st.session_state.circle_mode = False
-if "circle_center" not in st.session_state:
-    st.session_state.circle_center = None  # (lat, lon)
-if "circle_radius_km" not in st.session_state:
-    st.session_state.circle_radius_km = 50
-if "circle_selected_codes" not in st.session_state:
-    st.session_state.circle_selected_codes = None
-
-# ---------------- Load data ----------------
+# ---------------- Load and split depot ----------------
 df = load_excel(uploaded)
 
 depot_mask = df["Customer_Code"].astype(str).str.contains("DEPOT_ABC", na=False)
@@ -300,12 +284,15 @@ sites = df[~depot_mask].copy()
 
 # ---------------- Sidebar filters ----------------
 st.sidebar.header("Filters")
+
 annual_min = st.sidebar.number_input("Annual ≥ (MT)", 0.0, value=0.0)
 monthly_min = st.sidebar.number_input("Monthly ≥ (MT)", 0.0, value=0.0)
 weekly_min  = st.sidebar.number_input("Weekly ≥ (MT)", 0.0, value=0.0)
+
 top_n = st.sidebar.number_input("Top N by Annual (0 = all)", 0, value=0, step=5)
 
 st.sidebar.subheader("Search / Select workshops")
+
 all_names = sorted(sites["Customer_Name"].dropna().astype(str).unique().tolist())
 default_selected = all_names
 
@@ -331,34 +318,39 @@ st.sidebar.header("Map display")
 use_jitter = st.sidebar.checkbox("Jitter overlapping pins", True)
 jitter_m = st.sidebar.slider("Jitter meters", 0, 800, 140) if use_jitter else 0
 
-# ---------------- Build "base_f" (filters BEFORE circle selection) ----------------
-base_f = sites.copy()
+# ---------------- Apply filters ----------------
+f = sites.copy()
+
+# Name selection
 if selected_names:
-    base_f = base_f[base_f["Customer_Name"].isin(selected_names)]
+    f = f[f["Customer_Name"].isin(selected_names)]
 else:
-    base_f = base_f.iloc[0:0]
+    f = f.iloc[0:0]
 
-base_f = base_f[
-    (base_f["Generation_MT"] >= annual_min) &
-    (base_f["Monthly_Generation_MT"] >= monthly_min) &
-    (base_f["Weekly_Generation_MT"] >= weekly_min)
+# Volume filters
+f = f[
+    (f["Generation_MT"] >= annual_min) &
+    (f["Monthly_Generation_MT"] >= monthly_min) &
+    (f["Weekly_Generation_MT"] >= weekly_min)
 ]
+
+# Top N
 if top_n > 0:
-    base_f = base_f.sort_values("Generation_MT", ascending=False).head(int(top_n))
+    f = f.sort_values("Generation_MT", ascending=False).head(int(top_n))
 
-# Apply circle selection if exists
-f = base_f.copy()
-if st.session_state.circle_selected_codes is not None:
-    f = f[f["Customer_Code"].astype(str).isin(st.session_state.circle_selected_codes)]
+# Apply cluster filter if exists (this is the "selected area")
+if st.session_state.cluster_selected_codes is not None:
+    f = f[f["Customer_Code"].astype(str).isin(st.session_state.cluster_selected_codes)]
 
+# Totals (post all filters including cluster)
 weekly_total = float(f["Weekly_Generation_MT"].sum()) if len(f) else 0.0
 monthly_total = float(f["Monthly_Generation_MT"].sum()) if len(f) else 0.0
 annual_total = float(f["Generation_MT"].sum()) if len(f) else 0.0
 
-suffix = " (selected circle)" if st.session_state.circle_selected_codes is not None else " (filtered)"
+suffix = " (selected cluster)" if st.session_state.cluster_selected_codes is not None else " (filtered)"
 kpi_cards(len(f), weekly_total, monthly_total, annual_total, title_suffix=suffix)
 
-# Plot data for map (always show current f)
+# Plot data (with jitter)
 f_plot = apply_jitter(f, jitter_m)
 sizes = scale_sizes(f_plot["Weekly_Generation_MT"], min_size=12, max_size=30)
 
@@ -367,45 +359,31 @@ plot_lut = dict(zip(
     zip(f_plot["Lat_plot"].astype(float), f_plot["Lon_plot"].astype(float))
 ))
 
-# ---------------- Top controls ----------------
-t1, t2, t3, t4 = st.columns([1.4, 1.2, 1.7, 2.7], vertical_alignment="center")
+# ---------------- Top controls: Select Cluster / Clear Selection ----------------
+t1, t2, t3 = st.columns([1.2, 1.2, 3.6], vertical_alignment="center")
 
 with t1:
-    if st.button("Select Cluster (Circle)", key="btn_circle_mode"):
-        st.session_state.circle_mode = True
-        if st.session_state.circle_center is None:
-            st.session_state.circle_center = (float(depot["Latitude"]), float(depot["Longitude"]))
+    if st.button("Select Cluster", key="btn_cluster_mode"):
+        st.session_state.cluster_mode = True
 
 with t2:
+    # Secondary styled button
     st.markdown('<div class="secondary-btn">', unsafe_allow_html=True)
-    clear = st.button("Clear Selection", key="btn_clear_circle")
+    clear = st.button("Clear Selection", key="btn_clear_cluster")
     st.markdown("</div>", unsafe_allow_html=True)
     if clear:
-        st.session_state.circle_selected_codes = None
-        st.session_state.circle_center = None
-        st.session_state.circle_mode = False
-        st.rerun()
+        st.session_state.cluster_selected_codes = None
+        st.session_state.cluster_mode = False
 
 with t3:
-    if st.session_state.circle_mode or st.session_state.circle_selected_codes is not None:
-        st.session_state.circle_radius_km = st.slider(
-            "Radius (km)",
-            min_value=5,
-            max_value=250,
-            value=int(st.session_state.circle_radius_km),
-            step=5
-        )
-
-with t4:
-    if st.session_state.circle_mode:
-        st.info("Circle mode ON: click a workshop pin to set center, then adjust radius. It will select all within radius.")
+    if st.session_state.cluster_mode:
+        st.info("Cluster mode ON: use Box Select or Lasso Select on the map to select a region. (Top-right tool icons on the map)")
     else:
-        st.caption("Tip: Use 'Select Cluster (Circle)' to filter workshops within a radius.")
+        st.caption("Tip: Click 'Select Cluster' to draw a box/lasso on the map and filter to that area.")
 
-# ---------------- Map figure ----------------
+# ---------------- Map ----------------
 fig = go.Figure()
 
-# Workshops
 if len(f_plot) > 0:
     fig.add_trace(go.Scattermapbox(
         lat=f_plot["Lat_plot"],
@@ -436,7 +414,6 @@ if len(f_plot) > 0:
         name="Workshops"
     ))
 
-# Depot
 fig.add_trace(go.Scattermapbox(
     lat=[float(depot["Latitude"])],
     lon=[float(depot["Longitude"])],
@@ -450,28 +427,8 @@ fig.add_trace(go.Scattermapbox(
     name="Depot"
 ))
 
-# Circle drawing (if active)
-circle_center = st.session_state.circle_center
-radius_km = float(st.session_state.circle_radius_km)
-
-if circle_center is not None and (st.session_state.circle_mode or st.session_state.circle_selected_codes is not None):
-    clats, clons = circle_latlon(circle_center[0], circle_center[1], radius_km, n=140)
-
-    fig.add_trace(go.Scattermapbox(
-        lat=clats,
-        lon=clons,
-        mode="lines",
-        line=dict(width=3, color=ORANGE),
-        name="Selected radius"
-    ))
-    fig.add_trace(go.Scattermapbox(
-        lat=[circle_center[0]],
-        lon=[circle_center[1]],
-        mode="markers",
-        marker=dict(size=14, color=ORANGE),
-        hovertemplate="<b>Circle center</b><extra></extra>",
-        name="Center"
-    ))
+# Drag mode only in cluster mode (lets you box/lasso)
+dragmode = "lasso" if st.session_state.cluster_mode else "pan"
 
 fig.update_layout(
     mapbox=dict(
@@ -479,12 +436,12 @@ fig.update_layout(
         center=dict(lat=float(depot["Latitude"]) - 0.4, lon=float(depot["Longitude"]) + 0.1),
         zoom=6.8
     ),
-    dragmode="pan",
+    dragmode=dragmode,
     margin=dict(l=0, r=0, t=0, b=0),
     height=620
 )
 
-# framed map container
+# Framed container
 st.markdown(
     """
     <div style="
@@ -498,41 +455,35 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-sel = None
-if st.session_state.circle_mode:
-    sel = st.plotly_chart(fig, use_container_width=True, on_select="rerun", selection_mode=("points",))
+# Selection capture: only when cluster mode ON
+selection = None
+if st.session_state.cluster_mode:
+    # NOTE: Requires Streamlit that supports plotly selection callbacks
+    selection = st.plotly_chart(
+        fig,
+        use_container_width=True,
+        on_select="rerun",
+        selection_mode=("lasso", "box"),
+    )
 else:
     st.plotly_chart(fig, use_container_width=True)
 
 st.markdown("</div>", unsafe_allow_html=True)
 
-# If in circle mode and a point was clicked, set center, compute selection, apply
-if st.session_state.circle_mode and sel is not None:
+# If user made a selection, store selected codes and exit cluster mode
+if st.session_state.cluster_mode and selection is not None:
     try:
-        pts = sel.get("selection", {}).get("points", [])
+        pts = selection.get("selection", {}).get("points", [])
         if pts:
-            p = pts[0]
-            idx = p.get("point_index", None)
-            curve = p.get("curve_number", None)
-
-            # curve_number 0 -> workshops
-            if idx is not None and curve == 0 and len(f_plot) > idx:
-                lat_c = float(f_plot.iloc[idx]["Latitude"])
-                lon_c = float(f_plot.iloc[idx]["Longitude"])
-                st.session_state.circle_center = (lat_c, lon_c)
-
-            lat0, lon0 = st.session_state.circle_center
-
-            dist_km = base_f.apply(
-                lambda r: haversine_km(lat0, lon0, float(r["Latitude"]), float(r["Longitude"])),
-                axis=1
-            )
-            selected_codes = base_f.loc[dist_km <= radius_km, "Customer_Code"].astype(str).tolist()
-
-            st.session_state.circle_selected_codes = selected_codes
-            st.session_state.circle_mode = False
-            st.rerun()
+            idxs = [p["point_index"] for p in pts if "point_index" in p]
+            idxs = sorted(set(idxs))
+            if idxs:
+                selected_codes = f_plot.iloc[idxs]["Customer_Code"].astype(str).tolist()
+                st.session_state.cluster_selected_codes = selected_codes
+                st.session_state.cluster_mode = False
+                st.rerun()
     except Exception:
+        # If selection format differs, do nothing (safe)
         pass
 
 # ---------------- Route optimization ----------------
@@ -560,6 +511,7 @@ if run_route:
             route_df = ordered.iloc[route_nodes].reset_index(drop=True)
             route_km = obj_m / 1000.0
 
+            # Rebuild the line on the SAME map (need to redraw map with line)
             line_lat, line_lon = [], []
             for _, r in route_df.iterrows():
                 code = str(r["Customer_Code"])
@@ -579,6 +531,7 @@ if run_route:
                 name="Optimized route"
             ))
 
+            # Show updated map (still single map)
             st.markdown(
                 """
                 <div style="
