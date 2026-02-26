@@ -19,28 +19,21 @@ st.markdown(
     f"""
     <style>
       .stApp {{ background: #ffffff; }}
-
-      /* Bigger text everywhere */
       html, body, [class*="css"] {{ font-size: 18.5px !important; }}
 
       .title {{
-        font-size: 36px;
-        font-weight: 900;
-        color: {DARK_BLUE};
+        font-size: 36px; font-weight: 900; color: {DARK_BLUE};
         margin-bottom: 0.25rem;
       }}
       .subtitle {{
-        font-size: 17px;
-        color: #334155;
-        margin-top: 0;
-        margin-bottom: 1rem;
+        font-size: 17px; color: #334155;
+        margin-top: 0; margin-bottom: 1rem;
       }}
 
       section[data-testid="stSidebar"] label, section[data-testid="stSidebar"] p {{
         font-size: 16.5px !important;
       }}
 
-      /* KPI cards */
       .kpi-wrap {{
         display: grid;
         grid-template-columns: repeat(4, 1fr);
@@ -57,18 +50,8 @@ st.markdown(
       }}
       .kpi.orange {{ border-left-color: {ORANGE}; }}
       .kpi.dark {{ border-left-color: {DARK_BLUE}; }}
-      .kpi .label {{
-        font-size: 15px;
-        color: #475569;
-        margin-bottom: 6px;
-        font-weight: 700;
-      }}
-      .kpi .value {{
-        font-size: 28px;
-        color: #0f172a;
-        font-weight: 900;
-        line-height: 1.1;
-      }}
+      .kpi .label {{ font-size: 15px; color: #475569; margin-bottom: 6px; font-weight: 700; }}
+      .kpi .value {{ font-size: 28px; color: #0f172a; font-weight: 900; line-height: 1.1; }}
 
       .stButton > button {{
         background: {ORANGE};
@@ -79,10 +62,7 @@ st.markdown(
         font-weight: 900;
         font-size: 16.5px;
       }}
-      .stButton > button:hover {{
-        background: #d9551e;
-        color: white;
-      }}
+      .stButton > button:hover {{ background: #d9551e; color: white; }}
 
       thead tr th {{ font-weight: 800 !important; }}
     </style>
@@ -263,7 +243,6 @@ sites = df[~depot_mask].copy()
 
 # ---------------- Sidebar filters ----------------
 st.sidebar.header("Filters")
-
 annual_min = st.sidebar.number_input("Annual ≥ (MT)", 0.0, value=0.0)
 monthly_min = st.sidebar.number_input("Monthly ≥ (MT)", 0.0, value=0.0)
 weekly_min  = st.sidebar.number_input("Weekly ≥ (MT)", 0.0, value=0.0)
@@ -298,7 +277,6 @@ jitter_m = st.sidebar.slider("Jitter meters", 0, 800, 140) if use_jitter else 0
 st.sidebar.subheader("Map cluster selection")
 enable_select = st.sidebar.checkbox("Enable cluster select (box/lasso)", value=False)
 
-# persist selected codes
 if "map_selected_codes" not in st.session_state:
     st.session_state.map_selected_codes = []
 
@@ -324,7 +302,6 @@ if top_n > 0:
 weekly_total = float(f["Weekly_Generation_MT"].sum()) if len(f) else 0.0
 monthly_total = float(f["Monthly_Generation_MT"].sum()) if len(f) else 0.0
 annual_total = float(f["Generation_MT"].sum()) if len(f) else 0.0
-
 kpi_cards(len(f), weekly_total, monthly_total, annual_total)
 
 # Plot data (with jitter for visualization)
@@ -339,7 +316,7 @@ plot_lut = dict(zip(
 # ---------------- Build map figure ----------------
 fig = go.Figure()
 
-# Workshops trace FIRST (important for selection indexing)
+# Workshops trace FIRST (important for selection)
 if len(f_plot) > 0:
     fig.add_trace(go.Scattermapbox(
         lat=f_plot["Lat_plot"],
@@ -351,7 +328,7 @@ if len(f_plot) > 0:
         textfont=dict(size=15, color=BLUE),
         hovertext=f_plot["Customer_Name"],
         customdata=np.stack([
-            f_plot["Customer_Code"],  # keep code for selection mapping
+            f_plot["Customer_Code"],
             f_plot["City"],
             f_plot["Pin_Code"],
             f_plot["Generation_MT"],
@@ -392,11 +369,10 @@ fig.update_layout(
     ),
     margin=dict(l=0, r=0, t=0, b=0),
     height=620,
-    # make selection easier
     dragmode="lasso" if enable_select else "pan"
 )
 
-# ---------------- Render map with selection capture ----------------
+# ---------------- Render map + capture selection ----------------
 st.markdown(
     """
     <div style="
@@ -411,30 +387,22 @@ st.markdown(
 )
 
 if enable_select:
-    st.info("Selection mode ON: use the map toolbar → Box Select / Lasso Select, then drag on the map.")
+    st.info("Selection mode ON: use Plotly toolbar (top-right) → Box Select or Lasso Select, then drag on the map.")
     selected = plotly_events(
         fig,
         select_event=True,
         click_event=False,
         hover_event=False,
-        override_height=620,
-        config={
-            "scrollZoom": True,
-            "displaylogo": False,
-            "modeBarButtonsToAdd": ["select2d", "lasso2d"],
-        },
-        key="plot_select"
+        override_height=620
     )
 
-    # selected is a list of dicts; pointIndex maps to row in the workshops trace (trace 0)
+    # Convert selected points to Customer_Code list
     if selected:
         idxs = []
         for p in selected:
-            # ensure it's from workshops trace (curveNumber==0)
             if p.get("curveNumber", 0) == 0 and "pointIndex" in p:
                 idxs.append(int(p["pointIndex"]))
         idxs = sorted(set(idxs))
-
         if idxs:
             codes = f_plot.iloc[idxs]["Customer_Code"].astype(str).tolist()
             st.session_state.map_selected_codes = sorted(set(codes))
@@ -460,7 +428,8 @@ else:
     cD.metric("Annual MT", round(float(selected_df["Generation_MT"].sum()), 2))
 
     st.dataframe(
-        selected_df[["Customer_Name", "City", "Pin_Code", "Weekly_Generation_MT", "Monthly_Generation_MT", "Generation_MT"]]
+        selected_df[["Customer_Name", "City", "Pin_Code",
+                     "Weekly_Generation_MT", "Monthly_Generation_MT", "Generation_MT"]]
         .sort_values("Generation_MT", ascending=False)
         .reset_index(drop=True),
         use_container_width=True,
@@ -477,14 +446,10 @@ route_scope = st.radio(
     horizontal=True,
     index=1 if len(selected_df) > 0 else 0
 )
-
 run_route = st.button("Optimize route (draw line)")
 
 if run_route:
-    if route_scope == "Selected cluster":
-        base = selected_df.copy()
-    else:
-        base = f.copy()
+    base = selected_df.copy() if route_scope == "Selected cluster" else f.copy()
 
     if len(base) < 1:
         st.warning("No workshops available in this scope.")
@@ -502,8 +467,8 @@ if run_route:
             route_df = ordered.iloc[route_nodes].reset_index(drop=True)
             route_km = obj_m / 1000.0
 
-            # Add the line to a fresh figure (so selection mode doesn’t get messy)
-            fig_route = fig
+            # Copy base map and add route line
+            fig_route = go.Figure(fig)
 
             line_lat, line_lon = [], []
             for _, r in route_df.iterrows():
@@ -529,8 +494,8 @@ if run_route:
 
             st.subheader("Route order")
             st.dataframe(
-                route_df[["Customer_Name", "City", "Pin_Code", "Weekly_Generation_MT",
-                          "Monthly_Generation_MT", "Generation_MT"]]
+                route_df[["Customer_Name", "City", "Pin_Code",
+                          "Weekly_Generation_MT", "Monthly_Generation_MT", "Generation_MT"]]
                 .reset_index(drop=True),
                 use_container_width=True,
                 height=320
