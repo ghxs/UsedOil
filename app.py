@@ -107,7 +107,7 @@ st.markdown(
 # ---------------- Header ----------------
 st.markdown('<div class="title">Used Oil Collection Pilot — Maharashtra</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="subtitle">Filter workshops by volume/name, select a cluster on the map, and generate a one-way milk-run route from the depot.</div>',
+    '<div class="subtitle">Filter workshops, select a cluster on map, and generate a one-way milk-run route from a chosen recycler depot.</div>',
     unsafe_allow_html=True
 )
 
@@ -153,6 +153,11 @@ def build_distance_matrix(coords):
 
 
 def solve_open_route_from_depot(coords, seconds=2):
+    """
+    One-way milk run:
+    Start at depot (index 0), visit all points, end anywhere.
+    Dummy end node with zero inbound cost.
+    """
     n = len(coords)
     dummy_end = n
     coords2 = coords + [coords[0]]
@@ -191,7 +196,6 @@ def solve_open_route_from_depot(coords, seconds=2):
         route_nodes.append(manager.IndexToNode(idx))
         idx = sol.Value(routing.NextVar(idx))
     route_nodes.append(manager.IndexToNode(idx))  # dummy end
-
     return route_nodes, sol.ObjectiveValue(), dummy_end
 
 
@@ -265,34 +269,56 @@ def kpi_cards(workshops_count, weekly_mt, monthly_mt, annual_mt, title_suffix=""
     )
 
 
-# ---------------- Session state for cluster selection ----------------
+# ---------------- Session state ----------------
 if "cluster_mode" not in st.session_state:
     st.session_state.cluster_mode = False
 if "cluster_selected_codes" not in st.session_state:
-    st.session_state.cluster_selected_codes = None  # None means no cluster filter applied
+    st.session_state.cluster_selected_codes = None
 
-# ---------------- Load and split depot ----------------
+# ---------------- Load data ----------------
 df = load_excel(uploaded)
 
-depot_mask = df["Customer_Code"].astype(str).str.contains("DEPOT_ABC", na=False)
-if not depot_mask.any():
-    st.error("Depot row not found (Customer_Code must contain 'DEPOT_ABC').")
-    st.stop()
+# Try to find ABC depot in file (optional)
+abc_lat, abc_lon = None, None
+abc_name = "ABC Petrochem"
+abc_mask = df["Customer_Code"].astype(str).str.contains("DEPOT_ABC", na=False)
+if abc_mask.any():
+    r = df[abc_mask].iloc[0]
+    abc_lat = float(r["Latitude"])
+    abc_lon = float(r["Longitude"])
+    if "Customer_Name" in r and str(r["Customer_Name"]).strip():
+        abc_name = str(r["Customer_Name"]).strip()
 
-depot = df[depot_mask].iloc[0]
-sites = df[~depot_mask].copy()
+# Fallback if not present in file (edit these if needed)
+if abc_lat is None or abc_lon is None:
+    # If you know exact coords for ABC, put them here.
+    abc_lat, abc_lon = 19.7260, 72.7487  # fallback approx (can be refined)
+
+# Two recycler depots (hardcoded, no excel update needed)
+recyclers = {
+    "ABC Petrochem (Palghar)": {
+        "name": abc_name,
+        "lat": abc_lat,
+        "lon": abc_lon
+    },
+    "RANJANA GROUP OF INDUSTRIES (Nagpur)": {
+        "name": "RANJANA GROUP OF INDUSTRIES",
+        "lat": 20.9316,
+        "lon": 78.9659
+    }
+}
+
+# Workshops are everything except DEPOT_ABC row if it exists
+sites = df[~abc_mask].copy() if abc_mask.any() else df.copy()
 
 # ---------------- Sidebar filters ----------------
 st.sidebar.header("Filters")
-
 annual_min = st.sidebar.number_input("Annual ≥ (MT)", 0.0, value=0.0)
 monthly_min = st.sidebar.number_input("Monthly ≥ (MT)", 0.0, value=0.0)
 weekly_min  = st.sidebar.number_input("Weekly ≥ (MT)", 0.0, value=0.0)
-
 top_n = st.sidebar.number_input("Top N by Annual (0 = all)", 0, value=0, step=5)
 
 st.sidebar.subheader("Search / Select workshops")
-
 all_names = sorted(sites["Customer_Name"].dropna().astype(str).unique().tolist())
 default_selected = all_names
 
@@ -321,7 +347,7 @@ jitter_m = st.sidebar.slider("Jitter meters", 0, 800, 140) if use_jitter else 0
 # ---------------- Apply filters ----------------
 f = sites.copy()
 
-# Name selection
+# Name filter
 if selected_names:
     f = f[f["Customer_Name"].isin(selected_names)]
 else:
@@ -338,26 +364,16 @@ f = f[
 if top_n > 0:
     f = f.sort_values("Generation_MT", ascending=False).head(int(top_n))
 
-# Apply cluster filter if exists (this is the "selected area")
+# Apply cluster selection (if any)
 if st.session_state.cluster_selected_codes is not None:
     f = f[f["Customer_Code"].astype(str).isin(st.session_state.cluster_selected_codes)]
 
-# Totals (post all filters including cluster)
+# Totals
 weekly_total = float(f["Weekly_Generation_MT"].sum()) if len(f) else 0.0
 monthly_total = float(f["Monthly_Generation_MT"].sum()) if len(f) else 0.0
 annual_total = float(f["Generation_MT"].sum()) if len(f) else 0.0
-
 suffix = " (selected cluster)" if st.session_state.cluster_selected_codes is not None else " (filtered)"
 kpi_cards(len(f), weekly_total, monthly_total, annual_total, title_suffix=suffix)
-
-# Plot data (with jitter)
-f_plot = apply_jitter(f, jitter_m)
-sizes = scale_sizes(f_plot["Weekly_Generation_MT"], min_size=12, max_size=30)
-
-plot_lut = dict(zip(
-    f_plot["Customer_Code"].astype(str),
-    zip(f_plot["Lat_plot"].astype(float), f_plot["Lon_plot"].astype(float))
-))
 
 # ---------------- Top controls: Select Cluster / Clear Selection ----------------
 t1, t2, t3 = st.columns([1.2, 1.2, 3.6], vertical_alignment="center")
@@ -367,7 +383,6 @@ with t1:
         st.session_state.cluster_mode = True
 
 with t2:
-    # Secondary styled button
     st.markdown('<div class="secondary-btn">', unsafe_allow_html=True)
     clear = st.button("Clear Selection", key="btn_clear_cluster")
     st.markdown("</div>", unsafe_allow_html=True)
@@ -377,30 +392,37 @@ with t2:
 
 with t3:
     if st.session_state.cluster_mode:
-        st.info("Cluster mode ON: use Box Select or Lasso Select on the map to select a region. (Top-right tool icons on the map)")
+        st.info("Cluster mode ON: use Box Select or Lasso Select on the map (top-right tools) to select an area.")
     else:
-        st.caption("Tip: Click 'Select Cluster' to draw a box/lasso on the map and filter to that area.")
+        st.caption("Tip: Click 'Select Cluster' to draw a box/lasso on the same map and filter to that region.")
 
-# ---------------- Map ----------------
+# ---------------- Map points dataset for selection mode ----------------
+# In cluster mode, show ALL workshops (no filters), so you can pick any region easily.
+map_base = sites.copy() if st.session_state.cluster_mode else f.copy()
+
+map_plot = apply_jitter(map_base, jitter_m if not st.session_state.cluster_mode else jitter_m)
+map_sizes = scale_sizes(map_plot["Weekly_Generation_MT"], min_size=12, max_size=30)
+
+# ---------------- Build map ----------------
 fig = go.Figure()
 
-if len(f_plot) > 0:
+if len(map_plot) > 0:
     fig.add_trace(go.Scattermapbox(
-        lat=f_plot["Lat_plot"],
-        lon=f_plot["Lon_plot"],
+        lat=map_plot["Lat_plot"],
+        lon=map_plot["Lon_plot"],
         mode="markers+text",
-        marker=dict(size=sizes, color=BLUE, opacity=0.95),
-        text=["📍"] * len(f_plot),
+        marker=dict(size=map_sizes, color=BLUE, opacity=0.95),
+        text=["📍"] * len(map_plot),
         textposition="top center",
         textfont=dict(size=15, color=BLUE),
-        hovertext=f_plot["Customer_Name"],
+        hovertext=map_plot["Customer_Name"],
         customdata=np.stack([
-            f_plot["Customer_Code"].astype(str),
-            f_plot["City"],
-            f_plot["Pin_Code"],
-            f_plot["Generation_MT"],
-            f_plot["Monthly_Generation_MT"],
-            f_plot["Weekly_Generation_MT"]
+            map_plot["Customer_Code"].astype(str),
+            map_plot["City"],
+            map_plot["Pin_Code"],
+            map_plot["Generation_MT"],
+            map_plot["Monthly_Generation_MT"],
+            map_plot["Weekly_Generation_MT"]
         ], axis=1),
         hovertemplate=(
             "<b>%{hovertext}</b><br>"
@@ -414,29 +436,39 @@ if len(f_plot) > 0:
         name="Workshops"
     ))
 
-fig.add_trace(go.Scattermapbox(
-    lat=[float(depot["Latitude"])],
-    lon=[float(depot["Longitude"])],
-    mode="markers+text",
-    marker=dict(size=30, color=ORANGE, opacity=1),
-    text=["📌"],
-    textposition="top center",
-    textfont=dict(size=17, color=ORANGE),
-    hovertext=[depot["Customer_Name"]],
-    hovertemplate="<b>Depot: %{hovertext}</b><extra></extra>",
-    name="Depot"
-))
+# Recycler selector (for route + highlight)
+selected_recycler_label = st.selectbox(
+    "Select Recycler for Route Optimization",
+    list(recyclers.keys())
+)
 
-# Drag mode only in cluster mode (lets you box/lasso)
-dragmode = "lasso" if st.session_state.cluster_mode else "pan"
+# Plot both recycler depots (always visible)
+for label, rec in recyclers.items():
+    fig.add_trace(go.Scattermapbox(
+        lat=[rec["lat"]],
+        lon=[rec["lon"]],
+        mode="markers+text",
+        marker=dict(
+            size=34,
+            color=ORANGE if label == selected_recycler_label else DARK_BLUE,
+            opacity=1
+        ),
+        text=["🏭"],
+        textposition="top center",
+        textfont=dict(size=18, color=ORANGE if label == selected_recycler_label else DARK_BLUE),
+        hovertext=[rec["name"]],
+        hovertemplate="<b>%{hovertext}</b><extra></extra>",
+        name=label
+    ))
 
+# Drag mode only in cluster mode
 fig.update_layout(
     mapbox=dict(
         style="open-street-map",
-        center=dict(lat=float(depot["Latitude"]) - 0.4, lon=float(depot["Longitude"]) + 0.1),
-        zoom=6.8
+        center=dict(lat=20.5, lon=76.5),
+        zoom=6.2
     ),
-    dragmode=dragmode,
+    dragmode=("lasso" if st.session_state.cluster_mode else "pan"),
     margin=dict(l=0, r=0, t=0, b=0),
     height=620
 )
@@ -455,10 +487,9 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# Selection capture: only when cluster mode ON
 selection = None
 if st.session_state.cluster_mode:
-    # NOTE: Requires Streamlit that supports plotly selection callbacks
+    # Requires Streamlit plotly selection support
     selection = st.plotly_chart(
         fig,
         use_container_width=True,
@@ -470,20 +501,18 @@ else:
 
 st.markdown("</div>", unsafe_allow_html=True)
 
-# If user made a selection, store selected codes and exit cluster mode
+# Capture selected points -> store codes -> exit cluster mode
 if st.session_state.cluster_mode and selection is not None:
     try:
         pts = selection.get("selection", {}).get("points", [])
         if pts:
-            idxs = [p["point_index"] for p in pts if "point_index" in p]
-            idxs = sorted(set(idxs))
+            idxs = sorted(set([p["point_index"] for p in pts if "point_index" in p]))
             if idxs:
-                selected_codes = f_plot.iloc[idxs]["Customer_Code"].astype(str).tolist()
+                selected_codes = map_plot.iloc[idxs]["Customer_Code"].astype(str).tolist()
                 st.session_state.cluster_selected_codes = selected_codes
                 st.session_state.cluster_mode = False
                 st.rerun()
     except Exception:
-        # If selection format differs, do nothing (safe)
         pass
 
 # ---------------- Route optimization ----------------
@@ -494,13 +523,33 @@ with c1:
 route_df = None
 route_km = None
 
+# LUT for jittered drawing for filtered set only (for clean route line)
+f_plot = apply_jitter(f.copy(), jitter_m)
+plot_lut = dict(zip(
+    f_plot["Customer_Code"].astype(str),
+    zip(f_plot["Lat_plot"].astype(float), f_plot["Lon_plot"].astype(float))
+))
+
 if run_route:
     if len(f) < 1:
         st.warning("No workshops selected.")
     elif len(f) == 1:
         st.info("Only 1 workshop selected. No route line needed.")
     else:
-        ordered = pd.concat([pd.DataFrame([depot]), f], ignore_index=True).reset_index(drop=True)
+        rec = recyclers[selected_recycler_label]
+        depot_df = pd.DataFrame([{
+            "Customer_Name": rec["name"],
+            "Customer_Code": "DEPOT_SELECTED",
+            "Latitude": rec["lat"],
+            "Longitude": rec["lon"],
+            "City": "",
+            "Pin_Code": "",
+            "Generation_MT": 0,
+            "Monthly_Generation_MT": 0,
+            "Weekly_Generation_MT": 0
+        }])
+
+        ordered = pd.concat([depot_df, f], ignore_index=True).reset_index(drop=True)
         coords = list(zip(ordered["Latitude"].astype(float), ordered["Longitude"].astype(float)))
 
         route_nodes, obj_m, dummy_end = solve_open_route_from_depot(coords, seconds=2)
@@ -511,18 +560,18 @@ if run_route:
             route_df = ordered.iloc[route_nodes].reset_index(drop=True)
             route_km = obj_m / 1000.0
 
-            # Rebuild the line on the SAME map (need to redraw map with line)
             line_lat, line_lon = [], []
             for _, r in route_df.iterrows():
                 code = str(r["Customer_Code"])
-                if "DEPOT_ABC" in code:
-                    line_lat.append(float(depot["Latitude"]))
-                    line_lon.append(float(depot["Longitude"]))
+                if code == "DEPOT_SELECTED":
+                    line_lat.append(float(rec["lat"]))
+                    line_lon.append(float(rec["lon"]))
                 else:
                     latlon = plot_lut.get(code, (float(r["Latitude"]), float(r["Longitude"])))
                     line_lat.append(latlon[0])
                     line_lon.append(latlon[1])
 
+            # Draw line on SAME map figure (no extra map)
             fig.add_trace(go.Scattermapbox(
                 lat=line_lat,
                 lon=line_lon,
@@ -531,7 +580,6 @@ if run_route:
                 name="Optimized route"
             ))
 
-            # Show updated map (still single map)
             st.markdown(
                 """
                 <div style="
