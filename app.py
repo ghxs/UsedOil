@@ -18,7 +18,6 @@ st.markdown(
     f"""
     <style>
       .stApp {{ background: #ffffff; }}
-
       html, body, [class*="css"] {{ font-size: 18.5px !important; }}
 
       .title {{
@@ -181,8 +180,7 @@ def solve_round_trip_from_depot(coords, seconds=2):
     while not routing.IsEnd(idx):
         route_nodes.append(manager.IndexToNode(idx))
         idx = sol.Value(routing.NextVar(idx))
-    route_nodes.append(manager.IndexToNode(idx))  # end node (depot again)
-
+    route_nodes.append(manager.IndexToNode(idx))  # depot again
     return route_nodes, sol.ObjectiveValue()
 
 
@@ -256,6 +254,10 @@ def kpi_cards(workshops_count, weekly_mt, monthly_mt, annual_mt, title_suffix=""
     )
 
 
+def midpoint(a_lat, a_lon, b_lat, b_lon):
+    return (a_lat + b_lat) / 2.0, (a_lon + b_lon) / 2.0
+
+
 # ---------------- Session state ----------------
 if "cluster_mode" not in st.session_state:
     st.session_state.cluster_mode = False
@@ -278,7 +280,7 @@ if abc_mask.any():
 
 # Fallback if not present in file
 if abc_lat is None or abc_lon is None:
-    abc_lat, abc_lon = 19.7260, 72.7487  # fallback approx (edit if you want exact)
+    abc_lat, abc_lon = 19.7260, 72.7487  # fallback approx
 
 # Two recycler depots (hardcoded)
 recyclers = {
@@ -377,12 +379,17 @@ with t3:
     else:
         st.caption("Tip: Click 'Select Cluster' to draw a box/lasso on the same map and filter to that region.")
 
-# ---------------- Map dataset for selection mode ----------------
+# Map dataset for selection mode (show all while selecting)
 map_base = sites.copy() if st.session_state.cluster_mode else f.copy()
 map_plot = apply_jitter(map_base, jitter_m)
 map_sizes = scale_sizes(map_plot["Weekly_Generation_MT"], min_size=12, max_size=30)
 
-# ---------------- Build base map figure (single map) ----------------
+# Recycler selector (for route)
+selected_recycler_label = st.selectbox(
+    "Select Recycler for Route Optimization",
+    list(recyclers.keys())
+)
+
 def build_base_map_figure():
     fig0 = go.Figure()
 
@@ -416,7 +423,7 @@ def build_base_map_figure():
             name="Workshops"
         ))
 
-    # Both depots in ORANGE
+    # Depots (both orange)
     for label, rec in recyclers.items():
         fig0.add_trace(go.Scattermapbox(
             lat=[rec["lat"]],
@@ -443,12 +450,6 @@ def build_base_map_figure():
     )
     return fig0
 
-
-# Recycler selector (for route)
-selected_recycler_label = st.selectbox(
-    "Select Recycler for Route Optimization",
-    list(recyclers.keys())
-)
 
 fig = build_base_map_figure()
 
@@ -501,131 +502,141 @@ with c1:
 route_df = None
 route_km = None
 
-# LUT for nicer route drawing (use filtered workshops jittered)
+# LUT for route drawing (use filtered workshops jittered)
 f_plot = apply_jitter(f.copy(), jitter_m)
 plot_lut = dict(zip(
     f_plot["Customer_Code"].astype(str),
     zip(f_plot["Lat_plot"].astype(float), f_plot["Lon_plot"].astype(float))
 ))
 
-def midpoint(a_lat, a_lon, b_lat, b_lon):
-    return (a_lat + b_lat) / 2.0, (a_lon + b_lon) / 2.0
-
 if run_route:
     if len(f) < 1:
         st.warning("No workshops selected.")
-    elif len(f) == 1:
-        st.info("Only 1 workshop selected. Round-trip route = depot → workshop → depot.")
-    rec = recyclers[selected_recycler_label]
-
-    depot_df = pd.DataFrame([{
-        "Customer_Name": rec["name"],
-        "Customer_Code": "DEPOT_SELECTED",
-        "Latitude": rec["lat"],
-        "Longitude": rec["lon"],
-        "City": "",
-        "Pin_Code": "",
-        "Generation_MT": 0,
-        "Monthly_Generation_MT": 0,
-        "Weekly_Generation_MT": 0
-    }])
-
-    ordered = pd.concat([depot_df, f], ignore_index=True).reset_index(drop=True)
-    coords = list(zip(ordered["Latitude"].astype(float), ordered["Longitude"].astype(float)))
-
-    route_nodes, obj_m = solve_round_trip_from_depot(coords, seconds=2)
-    if route_nodes is None:
-        st.error("Route solve failed. Try reducing Top N.")
     else:
-        route_df = ordered.iloc[route_nodes].reset_index(drop=True)
-        route_km = obj_m / 1000.0
+        rec = recyclers[selected_recycler_label]
 
-        # Build polyline (use jitter for workshops, exact for depot)
-        line_lat, line_lon = [], []
-        for _, r in route_df.iterrows():
-            code = str(r["Customer_Code"])
-            if code == "DEPOT_SELECTED":
-                line_lat.append(float(rec["lat"]))
-                line_lon.append(float(rec["lon"]))
-            else:
-                latlon = plot_lut.get(code, (float(r["Latitude"]), float(r["Longitude"])))
-                line_lat.append(latlon[0])
-                line_lon.append(latlon[1])
+        depot_df = pd.DataFrame([{
+            "Customer_Name": rec["name"],
+            "Customer_Code": "DEPOT_SELECTED",
+            "Latitude": rec["lat"],
+            "Longitude": rec["lon"],
+            "City": "",
+            "Pin_Code": "",
+            "Generation_MT": 0,
+            "Monthly_Generation_MT": 0,
+            "Weekly_Generation_MT": 0
+        }])
 
-        # Add route line to the SAME map
-        fig_route = build_base_map_figure()
-        fig_route.add_trace(go.Scattermapbox(
-            lat=line_lat,
-            lon=line_lon,
-            mode="lines",
-            line=dict(width=5, color=DARK_BLUE),
-            name="Optimized round-trip route"
-        ))
+        ordered = pd.concat([depot_df, f], ignore_index=True).reset_index(drop=True)
+        coords = list(zip(ordered["Latitude"].astype(float), ordered["Longitude"].astype(float)))
 
-        # Direction cues:
-        # 1) Number the stops (excluding the final depot repeat)
-        stop_lat, stop_lon, stop_text = [], [], []
-        for i, r in route_df.iloc[:-1].iterrows():
-            code = str(r["Customer_Code"])
-            if code == "DEPOT_SELECTED":
-                lat_i, lon_i = float(rec["lat"]), float(rec["lon"])
-                stop_text.append("START")
-            else:
-                lat_i, lon_i = plot_lut.get(code, (float(r["Latitude"]), float(r["Longitude"])))
-                stop_text.append(str(i))  # sequence number
-            stop_lat.append(lat_i)
-            stop_lon.append(lon_i)
+        route_nodes, obj_m = solve_round_trip_from_depot(coords, seconds=2)
+        if route_nodes is None:
+            st.error("Route solve failed. Try reducing Top N.")
+        else:
+            route_df = ordered.iloc[route_nodes].reset_index(drop=True)
+            route_km = obj_m / 1000.0
 
-        fig_route.add_trace(go.Scattermapbox(
-            lat=stop_lat,
-            lon=stop_lon,
-            mode="markers+text",
-            marker=dict(size=14, color=DARK_BLUE, opacity=0.9),
-            text=stop_text,
-            textposition="bottom right",
-            textfont=dict(size=14, color=DARK_BLUE),
-            hoverinfo="skip",
-            name="Route order"
-        ))
+            # Polyline coords (use jitter for workshops)
+            line_lat, line_lon = [], []
+            for _, r in route_df.iterrows():
+                code = str(r["Customer_Code"])
+                if code == "DEPOT_SELECTED":
+                    line_lat.append(float(rec["lat"]))
+                    line_lon.append(float(rec["lon"]))
+                else:
+                    latlon = plot_lut.get(code, (float(r["Latitude"]), float(r["Longitude"])))
+                    line_lat.append(latlon[0])
+                    line_lon.append(latlon[1])
 
-        # 2) Add arrow glyphs at midpoints of each segment (simple direction hint)
-        mid_lat, mid_lon, mid_text = [], [], []
-        for i in range(len(line_lat) - 1):
-            mlat, mlon = midpoint(line_lat[i], line_lon[i], line_lat[i+1], line_lon[i+1])
-            mid_lat.append(mlat)
-            mid_lon.append(mlon)
-            mid_text.append("➡")
+            fig_route = build_base_map_figure()
 
-        fig_route.add_trace(go.Scattermapbox(
-            lat=mid_lat,
-            lon=mid_lon,
-            mode="text",
-            text=mid_text,
-            textfont=dict(size=18, color=DARK_BLUE),
-            hoverinfo="skip",
-            name="Direction"
-        ))
+            # Route line
+            fig_route.add_trace(go.Scattermapbox(
+                lat=line_lat,
+                lon=line_lon,
+                mode="lines",
+                line=dict(width=5, color=DARK_BLUE),
+                name="Optimized round-trip route"
+            ))
 
-        st.markdown(
-            """
-            <div style="
-                border:1px solid rgba(10,35,101,0.12);
-                border-radius:14px;
-                padding:6px;
-                box-shadow:0 6px 18px rgba(10,35,101,0.06);
-                margin-bottom:8px;
-            ">
-            """,
-            unsafe_allow_html=True
-        )
-        st.plotly_chart(fig_route, use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+            # Stop numbering (START, 1, 2, ...)
+            stop_lat, stop_lon, stop_text = [], [], []
+            for i, r in route_df.iloc[:-1].iterrows():  # exclude final depot repeat
+                code = str(r["Customer_Code"])
+                if code == "DEPOT_SELECTED":
+                    lat_i, lon_i = float(rec["lat"]), float(rec["lon"])
+                    txt = "START"
+                else:
+                    lat_i, lon_i = plot_lut.get(code, (float(r["Latitude"]), float(r["Longitude"])))
+                    txt = str(i)
+                stop_lat.append(lat_i)
+                stop_lon.append(lon_i)
+                stop_text.append(txt)
+
+            fig_route.add_trace(go.Scattermapbox(
+                lat=stop_lat,
+                lon=stop_lon,
+                mode="markers+text",
+                marker=dict(size=16, color=DARK_BLUE, opacity=0.95),
+                text=stop_text,
+                textposition="bottom right",
+                textfont=dict(size=15, color=DARK_BLUE),
+                hoverinfo="skip",
+                name="Route order"
+            ))
+
+            # Direction markers at segment midpoints (these will render reliably)
+            mid_lat, mid_lon = [], []
+            for i in range(len(line_lat) - 1):
+                mlat, mlon = midpoint(line_lat[i], line_lon[i], line_lat[i+1], line_lon[i+1])
+                mid_lat.append(mlat)
+                mid_lon.append(mlon)
+
+            # 1) Triangle markers
+            fig_route.add_trace(go.Scattermapbox(
+                lat=mid_lat,
+                lon=mid_lon,
+                mode="markers",
+                marker=dict(
+                    size=14,
+                    color=DARK_BLUE,
+                    opacity=0.95,
+                    symbol="triangle"
+                ),
+                hoverinfo="skip",
+                name="Direction"
+            ))
+
+            # 2) Backup arrow glyph on top (bigger so you actually see it)
+            fig_route.add_trace(go.Scattermapbox(
+                lat=mid_lat,
+                lon=mid_lon,
+                mode="text",
+                text=["▶"] * len(mid_lat),
+                textfont=dict(size=22, color=DARK_BLUE),
+                hoverinfo="skip",
+                showlegend=False
+            ))
+
+            st.markdown(
+                """
+                <div style="
+                    border:1px solid rgba(10,35,101,0.12);
+                    border-radius:14px;
+                    padding:6px;
+                    box-shadow:0 6px 18px rgba(10,35,101,0.06);
+                    margin-bottom:8px;
+                ">
+                """,
+                unsafe_allow_html=True
+            )
+            st.plotly_chart(fig_route, use_container_width=True)
+            st.markdown("</div>", unsafe_allow_html=True)
 
 if route_km is not None:
     st.success(f"Round-trip distance (approx): {route_km:.1f} km")
-
     st.subheader("Route order (round trip)")
-    # Hide the last repeated depot row in the table display
     display_route = route_df.copy()
     if len(display_route) > 1 and display_route.iloc[-1]["Customer_Code"] == "DEPOT_SELECTED":
         display_route = display_route.iloc[:-1].copy()
