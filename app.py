@@ -148,14 +148,10 @@ def build_distance_matrix(coords):
 
 
 def solve_round_trip_from_depot(coords, seconds=2):
-    """
-    Closed TSP:
-    Start at depot (index 0), visit all points, and RETURN to depot.
-    """
     n = len(coords)
     dist = build_distance_matrix(coords)
 
-    manager = pywrapcp.RoutingIndexManager(n, 1, 0)  # start/end at node 0
+    manager = pywrapcp.RoutingIndexManager(n, 1, 0)  # start/end at depot
     routing = pywrapcp.RoutingModel(manager)
 
     def dist_cb(from_index, to_index):
@@ -258,11 +254,13 @@ def midpoint(a_lat, a_lon, b_lat, b_lon):
     return (a_lat + b_lat) / 2.0, (a_lon + b_lon) / 2.0
 
 
-# ---------------- Session state ----------------
+# ---------------- Session state defaults ----------------
 if "cluster_mode" not in st.session_state:
     st.session_state.cluster_mode = False
 if "cluster_selected_codes" not in st.session_state:
     st.session_state.cluster_selected_codes = None
+if "selected_names" not in st.session_state:
+    st.session_state.selected_names = None
 
 # ---------------- Load data ----------------
 df = load_excel(uploaded)
@@ -284,39 +282,59 @@ if abc_lat is None or abc_lon is None:
 
 # Two recycler depots (hardcoded)
 recyclers = {
-    "ABC Petrochem (Palghar)": {
-        "name": abc_name,
-        "lat": abc_lat,
-        "lon": abc_lon
-    },
-    "RANJANA GROUP OF INDUSTRIES (Nagpur)": {
-        "name": "RANJANA GROUP OF INDUSTRIES",
-        "lat": 20.9316,
-        "lon": 78.9659
-    }
+    "ABC Petrochem (Palghar)": {"name": abc_name, "lat": abc_lat, "lon": abc_lon},
+    "RANJANA GROUP OF INDUSTRIES (Nagpur)": {"name": "RANJANA GROUP OF INDUSTRIES", "lat": 20.9316, "lon": 78.9659},
 }
 
 # Workshops are everything except DEPOT_ABC row (if it exists)
 sites = df[~abc_mask].copy() if abc_mask.any() else df.copy()
 
+# Names list and default selection
+all_names = sorted(sites["Customer_Name"].dropna().astype(str).unique().tolist())
+default_selected_names = all_names
+
+# Initialize default selection (once)
+if st.session_state.selected_names is None:
+    st.session_state.selected_names = default_selected_names
+
+# ---------------- RESET BUTTON (top-right) ----------------
+top_reset_col1, top_reset_col2 = st.columns([5, 1], vertical_alignment="center")
+with top_reset_col2:
+    st.markdown('<div class="secondary-btn">', unsafe_allow_html=True)
+    do_reset = st.button("Reset all", key="btn_reset_all")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+if do_reset:
+    # Reset sidebar widgets (must match keys)
+    st.session_state["annual_min"] = 0.0
+    st.session_state["monthly_min"] = 0.0
+    st.session_state["weekly_min"] = 0.0
+    st.session_state["top_n"] = 0
+    st.session_state["selected_names"] = default_selected_names
+    st.session_state["use_jitter"] = True
+    st.session_state["jitter_m"] = 140
+    st.session_state["recycler_choice"] = list(recyclers.keys())[0]
+
+    # Reset cluster selection state
+    st.session_state.cluster_selected_codes = None
+    st.session_state.cluster_mode = False
+
+    st.rerun()
+
 # ---------------- Sidebar filters ----------------
 st.sidebar.header("Filters")
-annual_min = st.sidebar.number_input("Annual ≥ (MT)", 0.0, value=0.0)
-monthly_min = st.sidebar.number_input("Monthly ≥ (MT)", 0.0, value=0.0)
-weekly_min  = st.sidebar.number_input("Weekly ≥ (MT)", 0.0, value=0.0)
-top_n = st.sidebar.number_input("Top N by Annual (0 = all)", 0, value=0, step=5)
+
+annual_min = st.sidebar.number_input("Annual ≥ (MT)", 0.0, value=0.0, key="annual_min")
+monthly_min = st.sidebar.number_input("Monthly ≥ (MT)", 0.0, value=0.0, key="monthly_min")
+weekly_min  = st.sidebar.number_input("Weekly ≥ (MT)", 0.0, value=0.0, key="weekly_min")
+top_n = st.sidebar.number_input("Top N by Annual (0 = all)", 0, value=0, step=5, key="top_n")
 
 st.sidebar.subheader("Search / Select workshops")
-all_names = sorted(sites["Customer_Name"].dropna().astype(str).unique().tolist())
-default_selected = all_names
-
-if "selected_names" not in st.session_state:
-    st.session_state.selected_names = default_selected
 
 b1, b2 = st.sidebar.columns(2)
 with b1:
     if st.button("Select all", key="btn_select_all"):
-        st.session_state.selected_names = default_selected
+        st.session_state.selected_names = default_selected_names
 with b2:
     if st.button("Clear all", key="btn_clear_all"):
         st.session_state.selected_names = []
@@ -329,8 +347,8 @@ selected_names = st.sidebar.multiselect(
 )
 
 st.sidebar.header("Map display")
-use_jitter = st.sidebar.checkbox("Jitter overlapping pins", True)
-jitter_m = st.sidebar.slider("Jitter meters", 0, 800, 140) if use_jitter else 0
+use_jitter = st.sidebar.checkbox("Jitter overlapping pins", True, key="use_jitter")
+jitter_m = st.sidebar.slider("Jitter meters", 0, 800, 140, key="jitter_m") if use_jitter else 0
 
 # ---------------- Apply filters ----------------
 f = sites.copy()
@@ -358,7 +376,7 @@ annual_total = float(f["Generation_MT"].sum()) if len(f) else 0.0
 suffix = " (selected cluster)" if st.session_state.cluster_selected_codes is not None else " (filtered)"
 kpi_cards(len(f), weekly_total, monthly_total, annual_total, title_suffix=suffix)
 
-# ---------------- Top controls: Select Cluster / Clear Selection ----------------
+# ---------------- Cluster buttons ----------------
 t1, t2, t3 = st.columns([1.2, 1.2, 3.6], vertical_alignment="center")
 
 with t1:
@@ -387,7 +405,8 @@ map_sizes = scale_sizes(map_plot["Weekly_Generation_MT"], min_size=12, max_size=
 # Recycler selector (for route)
 selected_recycler_label = st.selectbox(
     "Select Recycler for Route Optimization",
-    list(recyclers.keys())
+    list(recyclers.keys()),
+    key="recycler_choice"
 )
 
 def build_base_map_figure():
@@ -423,7 +442,6 @@ def build_base_map_figure():
             name="Workshops"
         ))
 
-    # Depots (both orange)
     for label, rec in recyclers.items():
         fig0.add_trace(go.Scattermapbox(
             lat=[rec["lat"]],
@@ -453,7 +471,6 @@ def build_base_map_figure():
 
 fig = build_base_map_figure()
 
-# Framed container
 st.markdown(
     """
     <div style="
@@ -537,7 +554,6 @@ if run_route:
             route_df = ordered.iloc[route_nodes].reset_index(drop=True)
             route_km = obj_m / 1000.0
 
-            # Polyline coords (use jitter for workshops)
             line_lat, line_lon = [], []
             for _, r in route_df.iterrows():
                 code = str(r["Customer_Code"])
@@ -551,7 +567,6 @@ if run_route:
 
             fig_route = build_base_map_figure()
 
-            # Route line
             fig_route.add_trace(go.Scattermapbox(
                 lat=line_lat,
                 lon=line_lon,
@@ -560,55 +575,22 @@ if run_route:
                 name="Optimized round-trip route"
             ))
 
-            # Stop numbering (START, 1, 2, ...)
-            stop_lat, stop_lon, stop_text = [], [], []
-            for i, r in route_df.iloc[:-1].iterrows():  # exclude final depot repeat
-                code = str(r["Customer_Code"])
-                if code == "DEPOT_SELECTED":
-                    lat_i, lon_i = float(rec["lat"]), float(rec["lon"])
-                    txt = "START"
-                else:
-                    lat_i, lon_i = plot_lut.get(code, (float(r["Latitude"]), float(r["Longitude"])))
-                    txt = str(i)
-                stop_lat.append(lat_i)
-                stop_lon.append(lon_i)
-                stop_text.append(txt)
-
-            fig_route.add_trace(go.Scattermapbox(
-                lat=stop_lat,
-                lon=stop_lon,
-                mode="markers+text",
-                marker=dict(size=16, color=DARK_BLUE, opacity=0.95),
-                text=stop_text,
-                textposition="bottom right",
-                textfont=dict(size=15, color=DARK_BLUE),
-                hoverinfo="skip",
-                name="Route order"
-            ))
-
-            # Direction markers at segment midpoints (these will render reliably)
+            # Direction markers (triangle + backup arrow)
             mid_lat, mid_lon = [], []
             for i in range(len(line_lat) - 1):
                 mlat, mlon = midpoint(line_lat[i], line_lon[i], line_lat[i+1], line_lon[i+1])
                 mid_lat.append(mlat)
                 mid_lon.append(mlon)
 
-            # 1) Triangle markers
             fig_route.add_trace(go.Scattermapbox(
                 lat=mid_lat,
                 lon=mid_lon,
                 mode="markers",
-                marker=dict(
-                    size=14,
-                    color=DARK_BLUE,
-                    opacity=0.95,
-                    symbol="triangle"
-                ),
+                marker=dict(size=14, color=DARK_BLUE, opacity=0.95, symbol="triangle"),
                 hoverinfo="skip",
                 name="Direction"
             ))
 
-            # 2) Backup arrow glyph on top (bigger so you actually see it)
             fig_route.add_trace(go.Scattermapbox(
                 lat=mid_lat,
                 lon=mid_lon,
@@ -619,35 +601,10 @@ if run_route:
                 showlegend=False
             ))
 
-            st.markdown(
-                """
-                <div style="
-                    border:1px solid rgba(10,35,101,0.12);
-                    border-radius:14px;
-                    padding:6px;
-                    box-shadow:0 6px 18px rgba(10,35,101,0.06);
-                    margin-bottom:8px;
-                ">
-                """,
-                unsafe_allow_html=True
-            )
             st.plotly_chart(fig_route, use_container_width=True)
-            st.markdown("</div>", unsafe_allow_html=True)
 
 if route_km is not None:
     st.success(f"Round-trip distance (approx): {route_km:.1f} km")
-    st.subheader("Route order (round trip)")
-    display_route = route_df.copy()
-    if len(display_route) > 1 and display_route.iloc[-1]["Customer_Code"] == "DEPOT_SELECTED":
-        display_route = display_route.iloc[:-1].copy()
-
-    st.dataframe(
-        display_route[["Customer_Name", "City", "Pin_Code",
-                       "Weekly_Generation_MT", "Monthly_Generation_MT", "Generation_MT"]]
-        .reset_index(drop=True),
-        use_container_width=True,
-        height=320
-    )
 
 # ---------------- Table + Download ----------------
 st.subheader("Filtered list")
