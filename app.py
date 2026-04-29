@@ -11,7 +11,7 @@ ORANGE = "#F26522"
 DARK_BLUE = "#0A2365"
 BLUE = "#0085C8"
 
-st.set_page_config(page_title="Used Oil Pilot Dashboard – Maharashtra", layout="wide")
+st.set_page_config(page_title="Used Oil Pilot Dashboard – Tamil Nadu", layout="wide")
 
 # ---------------- Global UI styling ----------------
 st.markdown(
@@ -100,15 +100,15 @@ st.markdown(
 )
 
 # ---------------- Header ----------------
-st.markdown('<div class="title">Used Oil Collection Pilot — Maharashtra</div>', unsafe_allow_html=True)
+st.markdown('<div class="title">Used Oil Collection Pilot — Tamil Nadu</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="subtitle">Filter workshops, select a cluster on map, and generate a round-trip milk-run route (start + return to recycler).</div>',
     unsafe_allow_html=True
 )
 
-uploaded = st.sidebar.file_uploader("Upload MH geocoded Excel", type=["xlsx"])
+uploaded = st.sidebar.file_uploader("Upload TN geocoded Excel", type=["xlsx"])
 if uploaded is None:
-    st.info("Upload MH_geocoded.xlsx from the sidebar to start.")
+    st.info("Upload TN_geocoded.xlsx from the sidebar to start.")
     st.stop()
 
 
@@ -411,7 +411,7 @@ def build_base_map_figure():
         ))
 
     fig0.update_layout(
-        mapbox=dict(style="open-street-map", center=dict(lat=20.5, lon=76.5), zoom=6.2),
+        mapbox=dict(style="open-street-map", center=dict(lat=11.0, lon=78.5), zoom=6.2),
         dragmode=("lasso" if st.session_state.cluster_mode else "pan"),
         margin=dict(l=0, r=0, t=0, b=0),
         height=620
