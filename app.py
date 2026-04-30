@@ -102,7 +102,7 @@ st.markdown(
 # ---------------- Header ----------------
 st.markdown('<div class="title">Used Oil Collection Pilot — Tamil Nadu</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="subtitle">Filter workshops, select a cluster on map, and generate a round-trip milk-run route from the depot.</div>',
+    '<div class="subtitle">Filter workshops by city, distance and volume; select a cluster on map; generate a round-trip milk-run route from the depot.</div>',
     unsafe_allow_html=True
 )
 
@@ -131,23 +131,6 @@ def load_excel(file) -> pd.DataFrame:
 
 
 df = load_excel(uploaded)
-
-# ---------------- Depot detection from Excel ----------------
-depot_mask = df["Customer_Code"].astype(str).str.contains("DEPOT", case=False, na=False)
-
-if not depot_mask.any():
-    st.error("Depot row not found. Make sure your Excel has one row where Customer_Code contains 'DEPOT'.")
-    st.stop()
-
-depot_row = df[depot_mask].iloc[0]
-
-depot = {
-    "name": str(depot_row["Customer_Name"]),
-    "lat": float(depot_row["Latitude"]),
-    "lon": float(depot_row["Longitude"])
-}
-
-sites = df[~depot_mask].copy()
 
 # ---------------- Helper functions ----------------
 def haversine_km(lat1, lon1, lat2, lon2):
@@ -262,7 +245,7 @@ def scale_sizes(values, min_size=12, max_size=30):
     return (min_size + x * (max_size - min_size)).to_numpy()
 
 
-def kpi_cards(workshops_count, weekly_mt, monthly_mt, annual_mt, title_suffix=""):
+def kpi_cards(workshops_count, weekly_mt, monthly_mt, annual_mt, avg_distance, title_suffix=""):
     st.markdown(
         f"""
         <div class="kpi-wrap">
@@ -279,8 +262,8 @@ def kpi_cards(workshops_count, weekly_mt, monthly_mt, annual_mt, title_suffix=""
             <div class="value">{monthly_mt:,.2f}</div>
           </div>
           <div class="kpi">
-            <div class="label">Annual total (MT)</div>
-            <div class="value">{annual_mt:,.2f}</div>
+            <div class="label">Avg distance from depot (km)</div>
+            <div class="value">{avg_distance:,.1f}</div>
           </div>
         </div>
         """,
@@ -291,6 +274,34 @@ def kpi_cards(workshops_count, weekly_mt, monthly_mt, annual_mt, title_suffix=""
 def midpoint(a_lat, a_lon, b_lat, b_lon):
     return (a_lat + b_lat) / 2.0, (a_lon + b_lon) / 2.0
 
+
+# ---------------- Depot detection from Excel ----------------
+depot_mask = df["Customer_Code"].astype(str).str.contains("DEPOT", case=False, na=False)
+
+if not depot_mask.any():
+    st.error("Depot row not found. Make sure your Excel has one row where Customer_Code contains 'DEPOT'.")
+    st.stop()
+
+depot_row = df[depot_mask].iloc[0]
+
+depot = {
+    "name": str(depot_row["Customer_Name"]),
+    "lat": float(depot_row["Latitude"]),
+    "lon": float(depot_row["Longitude"])
+}
+
+sites = df[~depot_mask].copy()
+
+# Distance from depot column
+sites["Distance_From_Depot_KM"] = sites.apply(
+    lambda r: haversine_km(
+        float(depot["lat"]),
+        float(depot["lon"]),
+        float(r["Latitude"]),
+        float(r["Longitude"])
+    ),
+    axis=1
+)
 
 # ---------------- Session state ----------------
 if "cluster_mode" not in st.session_state:
@@ -303,6 +314,7 @@ if "selected_names" not in st.session_state:
     st.session_state.selected_names = None
 
 
+all_cities = sorted(sites["City"].dropna().astype(str).unique().tolist())
 all_names = sorted(sites["Customer_Name"].dropna().astype(str).unique().tolist())
 
 if st.session_state.selected_names is None:
@@ -314,6 +326,11 @@ def reset_all():
     st.session_state.monthly_min = 0.0
     st.session_state.weekly_min = 0.0
     st.session_state.top_n = 0
+    st.session_state.distance_range = (
+        0.0,
+        float(math.ceil(sites["Distance_From_Depot_KM"].max()))
+    )
+    st.session_state.selected_cities = all_cities
     st.session_state.selected_names = all_names
     st.session_state.use_jitter = True
     st.session_state.jitter_m = 140
@@ -333,13 +350,54 @@ monthly_min = st.sidebar.number_input("Monthly ≥ (MT)", 0.0, value=0.0, key="m
 weekly_min = st.sidebar.number_input("Weekly ≥ (MT)", 0.0, value=0.0, key="weekly_min")
 top_n = st.sidebar.number_input("Top N by Annual (0 = all)", 0, value=0, step=5, key="top_n")
 
+st.sidebar.subheader("Distance from depot")
+max_distance = float(math.ceil(sites["Distance_From_Depot_KM"].max())) if len(sites) else 0.0
+
+distance_range = st.sidebar.slider(
+    "Distance range (km)",
+    min_value=0.0,
+    max_value=max_distance,
+    value=(0.0, max_distance),
+    step=5.0,
+    key="distance_range"
+)
+
+st.sidebar.subheader("Filter by City")
+
+selected_cities = st.sidebar.multiselect(
+    "Select cities",
+    options=all_cities,
+    default=all_cities,
+    key="selected_cities"
+)
+
+# This temp filter controls which workshop names appear in dropdown
+name_options_df = sites.copy()
+
+name_options_df = name_options_df[
+    (name_options_df["Distance_From_Depot_KM"] >= distance_range[0]) &
+    (name_options_df["Distance_From_Depot_KM"] <= distance_range[1])
+]
+
+if selected_cities:
+    name_options_df = name_options_df[name_options_df["City"].isin(selected_cities)]
+else:
+    name_options_df = name_options_df.iloc[0:0]
+
+name_options = sorted(name_options_df["Customer_Name"].dropna().astype(str).unique().tolist())
+
+# Ensure session selected names remain valid after city/distance changes
+valid_selected_names = [n for n in st.session_state.selected_names if n in name_options]
+if len(valid_selected_names) != len(st.session_state.selected_names):
+    st.session_state.selected_names = valid_selected_names
+
 st.sidebar.subheader("Search / Select workshops")
 
 b1, b2 = st.sidebar.columns(2)
 
 with b1:
     if st.button("Select all", key="btn_select_all"):
-        st.session_state.selected_names = all_names
+        st.session_state.selected_names = name_options
 
 with b2:
     if st.button("Clear all", key="btn_clear_all"):
@@ -347,7 +405,7 @@ with b2:
 
 selected_names = st.sidebar.multiselect(
     "Tick/Untick names",
-    options=all_names,
+    options=name_options,
     default=st.session_state.selected_names,
     key="selected_names"
 )
@@ -359,6 +417,16 @@ jitter_m = st.sidebar.slider("Jitter meters", 0, 800, 140, key="jitter_m") if us
 
 # ---------------- Apply filters ----------------
 f = sites.copy()
+
+f = f[
+    (f["Distance_From_Depot_KM"] >= distance_range[0]) &
+    (f["Distance_From_Depot_KM"] <= distance_range[1])
+]
+
+if selected_cities:
+    f = f[f["City"].isin(selected_cities)]
+else:
+    f = f.iloc[0:0]
 
 if selected_names:
     f = f[f["Customer_Name"].isin(selected_names)]
@@ -380,10 +448,11 @@ if st.session_state.cluster_selected_codes is not None:
 weekly_total = float(f["Weekly_Generation_MT"].sum()) if len(f) else 0.0
 monthly_total = float(f["Monthly_Generation_MT"].sum()) if len(f) else 0.0
 annual_total = float(f["Generation_MT"].sum()) if len(f) else 0.0
+avg_distance = float(f["Distance_From_Depot_KM"].mean()) if len(f) else 0.0
 
 suffix = " (selected cluster)" if st.session_state.cluster_selected_codes is not None else " (filtered)"
 
-kpi_cards(len(f), weekly_total, monthly_total, annual_total, title_suffix=suffix)
+kpi_cards(len(f), weekly_total, monthly_total, annual_total, avg_distance, title_suffix=suffix)
 
 # ---------------- Map data ----------------
 map_base = sites.copy() if st.session_state.cluster_mode else f.copy()
@@ -410,7 +479,8 @@ def build_base_map_figure():
                 map_plot["Pin_Code"],
                 map_plot["Generation_MT"],
                 map_plot["Monthly_Generation_MT"],
-                map_plot["Weekly_Generation_MT"]
+                map_plot["Weekly_Generation_MT"],
+                map_plot["Distance_From_Depot_KM"]
             ], axis=1),
             hovertemplate=(
                 "<b>%{hovertext}</b><br>"
@@ -419,6 +489,7 @@ def build_base_map_figure():
                 "Annual: %{customdata[3]:.2f} MT<br>"
                 "Monthly: %{customdata[4]:.2f} MT<br>"
                 "Weekly: %{customdata[5]:.2f} MT<br>"
+                "Distance from depot: %{customdata[6]:.1f} km<br>"
                 "<extra></extra>"
             ),
             name="Workshops"
@@ -559,7 +630,8 @@ if run_route:
             "Generation_MT": 0,
             "Monthly_Generation_MT": 0,
             "Weekly_Generation_MT": 0,
-            "Geocode_Status": ""
+            "Geocode_Status": "",
+            "Distance_From_Depot_KM": 0.0
         }])
 
         ordered = pd.concat([depot_df, f], ignore_index=True).reset_index(drop=True)
@@ -626,6 +698,7 @@ if route_km is not None:
                     "Customer_Name",
                     "City",
                     "Pin_Code",
+                    "Distance_From_Depot_KM",
                     "Generation_MT",
                     "Monthly_Generation_MT",
                     "Weekly_Generation_MT"
@@ -644,6 +717,7 @@ show_cols = [
     "Customer_Name",
     "City",
     "Pin_Code",
+    "Distance_From_Depot_KM",
     "Generation_MT",
     "Monthly_Generation_MT",
     "Weekly_Generation_MT",
