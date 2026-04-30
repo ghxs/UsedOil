@@ -132,6 +132,7 @@ def load_excel(file) -> pd.DataFrame:
 
 df = load_excel(uploaded)
 
+
 # ---------------- Helper functions ----------------
 def haversine_km(lat1, lon1, lat2, lon2):
     R = 6371.0
@@ -362,6 +363,10 @@ distance_range = st.sidebar.slider(
     key="distance_range"
 )
 
+# Manual refresh button added here
+if st.sidebar.button("Show / Refresh filtered map", key="btn_refresh_distance"):
+    st.rerun()
+
 st.sidebar.subheader("Filter by City")
 
 selected_cities = st.sidebar.multiselect(
@@ -415,6 +420,7 @@ st.sidebar.header("Map display")
 use_jitter = st.sidebar.checkbox("Jitter overlapping pins", True, key="use_jitter")
 jitter_m = st.sidebar.slider("Jitter meters", 0, 800, 140, key="jitter_m") if use_jitter else 0
 
+
 # ---------------- Apply filters ----------------
 f = sites.copy()
 
@@ -453,6 +459,7 @@ avg_distance = float(f["Distance_From_Depot_KM"].mean()) if len(f) else 0.0
 suffix = " (selected cluster)" if st.session_state.cluster_selected_codes is not None else " (filtered)"
 
 kpi_cards(len(f), weekly_total, monthly_total, annual_total, avg_distance, title_suffix=suffix)
+
 
 # ---------------- Map data ----------------
 map_base = sites.copy() if st.session_state.cluster_mode else f.copy()
@@ -551,6 +558,7 @@ else:
     st.plotly_chart(fig, use_container_width=True)
 
 st.markdown("</div>", unsafe_allow_html=True)
+
 
 # ---------------- Capture selected map points ----------------
 if st.session_state.cluster_mode and selection is not None:
